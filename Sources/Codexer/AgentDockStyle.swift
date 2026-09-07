@@ -3,20 +3,11 @@ import CodexerCore
 import SwiftUI
 
 enum AgentDockPalette {
-    static let graphite = Color(nsColor: NSColor(
-        calibratedRed: 0.082,
-        green: 0.082,
-        blue: 0.082,
-        alpha: 1
-    ))
-    static let panel = Color(nsColor: NSColor(
-        calibratedRed: 0.115,
-        green: 0.125,
-        blue: 0.14,
-        alpha: 1
-    ))
-    static let panelBorder = Color.white.opacity(0.085)
-    static let divider = Color.white.opacity(0.08)
+    static let graphite = Color(nsColor: .windowBackgroundColor)
+    static let panel = Color(nsColor: .controlBackgroundColor)
+    static let panelBorder = Color(nsColor: .separatorColor).opacity(0.55)
+    static let divider = Color(nsColor: .separatorColor).opacity(0.55)
+    static let selection = Color.accentColor.opacity(0.18)
     static let blue = Color(red: 0.12, green: 0.43, blue: 0.98)
 }
 
@@ -193,6 +184,8 @@ struct AgentDockEmptyState: View {
     let title: String
     let systemImage: String
     let description: String
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 10) {
@@ -206,10 +199,16 @@ struct AgentDockEmptyState: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .agentDockPrimaryAction()
+                    .controlSize(.regular)
+                    .padding(.top, 6)
+            }
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 

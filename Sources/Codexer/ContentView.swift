@@ -47,7 +47,7 @@ struct ContentView: View {
                 model.pendingRemoveProfile = nil
             }
         } message: {
-            Text("AgentDock will forget this profile, but its local data will remain on disk and can be restored later.")
+            Text("AgentDock will remove \(model.pendingRemoveProfile?.name ?? "this profile") from the list. Its local data will remain on disk and can be restored later.")
         }
         .alert("Permanently Delete Profile Data?", isPresented: deleteBinding) {
             Button("Delete Data", role: .destructive) {
@@ -59,12 +59,16 @@ struct ContentView: View {
                 model.pendingDeleteProfile = nil
             }
         } message: {
-            Text("This permanently removes the profile's managed local sessions, settings, and shortcut. Credentials in shared macOS Keychain or external provider stores are not deleted. This cannot be undone.")
+            Text("This permanently removes the managed local sessions, settings, and shortcut for \(model.pendingDeleteProfile?.name ?? "this profile"). Credentials in shared macOS Keychain or external provider stores are not deleted. This cannot be undone.")
         }
-        .onAppear {
+        .task {
             model.refreshChats()
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentDockFocusSearch)) { _ in
+            guard showsSettings || model.detailTab != .chats else { return }
+            searchFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .agentDockFocusProfileSearch)) { _ in
             searchFocused = true
         }
         .onChange(of: model.detailTab) { _, tab in
@@ -109,7 +113,7 @@ struct ContentView: View {
                     Image(systemName: "gearshape")
                         .frame(width: 28, height: 28)
                         .background(
-                            showsSettings ? AgentDockPalette.blue.opacity(0.72) : .clear,
+                            showsSettings ? AgentDockPalette.selection : .clear,
                             in: .rect(cornerRadius: 7)
                         )
                 }
@@ -142,12 +146,20 @@ struct ContentView: View {
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
                 .onSubmit(selectFirstSearchResult)
-            Text("⌘F")
-                .font(.caption2.monospaced())
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
-                .background(.white.opacity(0.04), in: .rect(cornerRadius: 5))
+                .onExitCommand { profileSearch = "" }
+                .accessibilityLabel("Search profiles")
+            if !profileSearch.isEmpty {
+                Button {
+                    profileSearch = ""
+                    searchFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear profile search")
+                .accessibilityLabel("Clear profile search")
+            }
         }
         .font(.system(size: 13))
         .padding(.horizontal, 10)
@@ -214,7 +226,7 @@ struct ContentView: View {
                 )
             }
 
-            if profiles.isEmpty, !profileSearch.isEmpty {
+            if profiles.isEmpty, !profileQuery.isEmpty {
                 Text("No matching profiles")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -239,6 +251,7 @@ struct ContentView: View {
                             OverviewView()
                         case .chats:
                             ChatsView()
+                                .id(model.sidebarSelection)
                         case .advanced:
                             AdvancedView()
                         }
@@ -250,7 +263,13 @@ struct ContentView: View {
     }
 
     private var detailToolbar: some View {
-        ZStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                selectedSourceIdentity
+                Spacer(minLength: 12)
+                detailActions
+            }
+
             if model.selectedProfile != nil || model.selectedOfficialProduct != nil {
                 Picker("Profile Section", selection: $model.detailTab) {
                     ForEach(visibleDetailTabs) { tab in
@@ -261,43 +280,82 @@ struct ContentView: View {
                 .labelsHidden()
                 .frame(width: visibleDetailTabs.count == 3 ? 300 : 170)
             }
-
-            HStack {
-                Spacer()
-
-                Button {
-                    model.showAddProfile = true
-                } label: {
-                    Label("Add Profile", systemImage: "plus")
-                        .font(.system(size: 13))
-                }
-                .agentDockToolbarAction()
-                .keyboardShortcut("n", modifiers: .command)
-
-                Button(action: refreshContent) {
-                    Image(systemName: "arrow.clockwise")
-                        .frame(width: 14, height: 14)
-                }
-                .agentDockToolbarAction()
-                .help("Refresh profile activity and chats")
-                .accessibilityLabel("Refresh")
-
-                Menu {
-                    Button("Restore Profile…") {
-                        model.restoreProfile()
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .frame(width: 24, height: 24)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("More actions")
-            }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 32)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+    }
+
+    private var detailActions: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.showAddProfile = true
+            } label: {
+                Label("Add Profile", systemImage: "plus")
+                    .font(.system(size: 13))
+            }
+            .agentDockToolbarAction()
+            .keyboardShortcut("n", modifiers: .command)
+
+            Button(action: refreshContent) {
+                Image(systemName: "arrow.clockwise")
+                    .frame(width: 14, height: 14)
+            }
+            .agentDockToolbarAction()
+            .help("Refresh profile activity and chats")
+            .accessibilityLabel("Refresh")
+            .keyboardShortcut("r", modifiers: .command)
+
+            Menu {
+                Button("Restore Profile…") {
+                    model.restoreProfile()
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 24, height: 24)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("More actions")
+        }
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private var selectedSourceIdentity: some View {
+        if let profile = model.selectedProfile {
+            HStack(spacing: 8) {
+                ProfileIconView(profile: profile, size: 26)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(profile.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text("Managed \(profile.product.displayName) profile")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .help("\(profile.name) · Managed \(profile.product.displayName) profile")
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Selected profile: \(profile.name), managed \(profile.product.displayName)")
+        } else if let product = model.selectedOfficialProduct {
+            HStack(spacing: 8) {
+                ProviderIconView(product: product, appURL: model.appURL(for: product), size: 26)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Official \(product.displayName)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text("Default installation")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            Text("Profiles")
+                .font(.system(size: 13, weight: .semibold))
+        }
     }
 
     private var visibleDetailTabs: [AgentDockDetailTab] {
@@ -306,11 +364,15 @@ struct ContentView: View {
 
     private func filteredProfiles(for product: DesktopProduct) -> [CodexProfile] {
         let productProfiles = model.profiles.filter { $0.product == product }
-        guard !profileSearch.isEmpty else { return productProfiles }
+        guard !profileQuery.isEmpty else { return productProfiles }
         return productProfiles.filter {
-            $0.name.localizedCaseInsensitiveContains(profileSearch)
-                || $0.slug.localizedCaseInsensitiveContains(profileSearch)
+            $0.name.localizedCaseInsensitiveContains(profileQuery)
+                || $0.slug.localizedCaseInsensitiveContains(profileQuery)
         }
+    }
+
+    private var profileQuery: String {
+        profileSearch.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func selectFirstSearchResult() {
@@ -367,7 +429,7 @@ struct ContentView: View {
 
     private var errorBinding: Binding<Bool> {
         Binding(
-            get: { model.errorMessage != nil && !model.showAddProfile },
+            get: { model.errorMessage != nil && !model.showAddProfile && !model.showEditProfile },
             set: { if !$0 { model.errorMessage = nil } }
         )
     }
@@ -487,7 +549,7 @@ private struct OfficialSidebarRow: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 46)
-        .background(isSelected ? AgentDockPalette.blue.opacity(0.72) : .clear, in: .rect(cornerRadius: 8))
+        .background(isSelected ? AgentDockPalette.selection : .clear, in: .rect(cornerRadius: 8))
         .contentShape(.rect)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
@@ -514,6 +576,7 @@ private struct ProfileSidebarRow: View {
                 ProfileIconView(profile: profile, size: 32)
             }
             .buttonStyle(.plain)
+            .disabled(model.isBusy(profile))
             .help(running ? "Focus \(profile.name)" : "Open \(profile.name)")
             .accessibilityLabel(running ? "Focus \(profile.name)" : "Open \(profile.name)")
 
@@ -559,7 +622,7 @@ private struct ProfileSidebarRow: View {
         }
         .padding(.horizontal, 10)
         .frame(height: Self.rowHeight)
-        .background(isSelected ? AgentDockPalette.blue.opacity(0.72) : .clear, in: .rect(cornerRadius: 8))
+        .background(isSelected ? AgentDockPalette.selection : .clear, in: .rect(cornerRadius: 8))
         .draggable(profile.id.uuidString)
         .dropDestination(for: String.self) { items, location in
             guard let rawID = items.first,
@@ -581,4 +644,5 @@ private struct ProfileSidebarRow: View {
 
 extension Notification.Name {
     static let agentDockFocusSearch = Notification.Name("AgentDock.focusSearch")
+    static let agentDockFocusProfileSearch = Notification.Name("AgentDock.focusProfileSearch")
 }

@@ -221,9 +221,9 @@ public enum CodexInstanceDiscovery {
             else {
                 continue
             }
-            for path in userDataArguments(in: String(command)) {
-                result[canonicalUserDataPath(path), default: []].append(processID)
-            }
+            let paths = userDataArguments(in: String(command))
+            guard paths.count == 1, let path = paths.first, !path.isEmpty else { continue }
+            result[canonicalUserDataPath(path), default: []].append(processID)
         }
 
         return result.mapValues { $0.sorted() }
@@ -296,11 +296,7 @@ public enum CodexInstanceDiscovery {
         let appBundlePrefix = configuration.codexAppURL
             .standardizedFileURL
             .appendingPathComponent("Contents")
-            .path
-        let profileArguments = [
-            "--user-data-dir=\(profilePath)",
-            "--database=\(profilePath)/Crashpad"
-        ]
+            .path + "/"
 
         return processSnapshot.split(whereSeparator: \.isNewline).compactMap { line in
             let trimmed = line.drop(while: \.isWhitespace)
@@ -310,10 +306,19 @@ public enum CodexInstanceDiscovery {
                 return nil
             }
             let command = String(trimmed[separator...].drop(while: \.isWhitespace))
-            return command.hasPrefix(appBundlePrefix)
-                && profileArguments.contains(where: { containsArgument($0, in: command) })
-                ? processID
-                : nil
+            guard command.hasPrefix(appBundlePrefix) else { return nil }
+            let userDataPaths = userDataArguments(in: command)
+            let databasePaths = argumentValues(named: "--database", in: command)
+            guard userDataPaths.count <= 1, databasePaths.count <= 1,
+                  !userDataPaths.isEmpty || !databasePaths.isEmpty,
+                  userDataPaths.allSatisfy({ !$0.isEmpty && canonicalUserDataPath($0) == profilePath }),
+                  databasePaths.allSatisfy({
+                      !$0.isEmpty && canonicalUserDataPath($0) == profilePath + "/Crashpad"
+                  })
+            else {
+                return nil
+            }
+            return processID
         }.sorted()
     }
 
@@ -335,17 +340,12 @@ public enum CodexInstanceDiscovery {
         }
     }
 
-    private static func containsArgument(_ argument: String, in command: String) -> Bool {
-        guard let range = command.range(of: argument) else { return false }
-        let beginsArgument = range.lowerBound == command.startIndex
-            || command[command.index(before: range.lowerBound)].isWhitespace
-        let followsArgument = range.upperBound == command.endIndex
-            || command[range.upperBound].isWhitespace
-        return beginsArgument && followsArgument
+    static func userDataArguments(in command: String) -> [String] {
+        argumentValues(named: "--user-data-dir", in: command)
     }
 
-    private static func userDataArguments(in command: String) -> [String] {
-        let marker = "--user-data-dir="
+    private static func argumentValues(named name: String, in command: String) -> [String] {
+        let marker = name + "="
         var values: [String] = []
         var searchStart = command.startIndex
         while let markerRange = command.range(
@@ -360,9 +360,7 @@ public enum CodexInstanceDiscovery {
             if beginsArgument {
                 let value = command[valueStart..<valueEnd]
                     .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                if !value.isEmpty {
-                    values.append(value)
-                }
+                values.append(value)
             }
             searchStart = valueEnd
         }
@@ -404,10 +402,11 @@ public struct SystemCodexWorkspaceLauncher: CodexWorkspaceLaunching {
         inheriting inheritedEnvironment: [String: String],
         codexAppURL: URL,
         codexHomePath: String?,
+        electronUserDataPath: String? = nil,
         configProfile: CodexConfigProfile? = nil,
         profileProxyURL: URL? = nil
     ) -> [String: String] {
-        var environment = inheritedEnvironment
+        var environment = DesktopLaunchEnvironment.sanitized(inheritedEnvironment)
         let bundledCLIURL = codexAppURL
             .appendingPathComponent("Contents/Resources/codex", isDirectory: false)
         environment["CODEX_CLI_PATH"] = (configProfile == nil ? bundledCLIURL : profileProxyURL)?.path
@@ -421,9 +420,10 @@ public struct SystemCodexWorkspaceLauncher: CodexWorkspaceLaunching {
         }
         if let codexHomePath {
             environment["CODEX_HOME"] = codexHomePath
-        } else {
-            environment.removeValue(forKey: "CODEX_HOME")
         }
+        // Codex also uses this explicit path to preserve CODEX_HOME while loading
+        // the user's login-shell environment during startup.
+        environment["CODEX_ELECTRON_USER_DATA_PATH"] = electronUserDataPath
         return environment
     }
 
@@ -443,6 +443,7 @@ public struct SystemCodexWorkspaceLauncher: CodexWorkspaceLaunching {
             inheriting: ProcessInfo.processInfo.environment,
             codexAppURL: configuration.codexAppURL,
             codexHomePath: configuration.codexHomePath,
+            electronUserDataPath: configuration.electronUserDataPath,
             configProfile: configuration.codexConfigProfile,
             profileProxyURL: profileProxyURL
         )
@@ -1442,9 +1443,9 @@ public enum CodexLauncherError: Error, LocalizedError, Equatable {
         case .launchDidNotReturnProcess:
             "macOS did not return the process for the new Codex instance."
         case let .launchedProcessFailedValidation(processID):
-            "The launched process \(processID) did not match the signed official app and was stopped."
+            "The launched process \(processID) could not be verified as the selected signed app profile."
         case let .launchedProcessDidNotPresentWindow(processID):
-            "Codex profile process \(processID) launched but did not present a window and was stopped."
+            "Codex profile process \(processID) launched but did not present a window."
         case let .couldNotFocus(processID):
             "Codex profile process \(processID) is running but could not be focused."
         case let .couldNotTerminate(processID):

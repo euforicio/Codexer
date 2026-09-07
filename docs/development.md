@@ -92,7 +92,41 @@ The package includes
 [app-model tests](../Tests/CodexerAppTests/CodexerModelTests.swift),
 [transcript-renderer tests](../Tests/TranscriptRendererTests), and vendored
 parser tests. Tests must use real repository-native behavior; do not add mocks
-or stubs.
+or stubs. App-model fixtures must supply a temporary `officialDataRootURL` so
+standard-provider reads stay inside the fixture as well as managed-profile
+reads.
+
+Synthetic UI acceptance images can be rendered without reading signed-in
+accounts or launching provider applications:
+
+```bash
+AGENTDOCK_VISUAL_AUDIT_DIR=/tmp/agentdock-visual-audit swift test \
+  --filter ProfileSelectionIsolationTests/testSyntheticVisualAudit
+```
+
+This opt-in harness uses real temporary profile files and isolated preferences
+to render the overview and chat surfaces in light and dark appearances at
+regular and compact sizes, including long profile names. It briefly presents
+synthetic windows and requires Screen Recording access for native window
+capture. Inspect the resulting images for hierarchy, clipping, contrast, and source identity;
+render completion alone is not visual acceptance.
+
+The two-profile lifecycle check uses temporary profiles and verifies separate
+processes, persistence through restart, and preservation of the other profile
+and existing provider instances. Failed checks preserve temporary data for
+manual diagnosis and can leave test instances running; verify exact process
+ownership before cleanup. It opens installed provider applications:
+
+```bash
+AGENTDOCK_LIVE_ISOLATION_TEST=1 swift test --filter LiveProfileIsolationTests
+```
+
+The Claude check also inspects bounded open-file metadata for each verified
+process tree before and after restart. It requires files under that profile's
+UserData and none under the default or sibling root; output contains counts
+only. A vanished startup helper triggers a fresh inventory, while a changed
+main process identity fails the check.
+
 
 Installed-app checks:
 

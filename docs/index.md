@@ -19,6 +19,8 @@ implementation, contribution, and operations details needed for focused work.
   verification, and publication.
 - [Security and privacy](security.md): trust boundaries, local data handling,
   secret handling, and disclosure guidance.
+- [Profile isolation and quality audit](audit-2026-09-07.md): findings, fixes,
+  validation evidence, and remaining acceptance gates.
 - [Privacy policy](privacy.md): local-first and revocable analytics commitments.
 - [Product analytics](analytics.md): event catalog, opt-in, PostHog operations,
   dashboards, funnels, cohorts, and retention.

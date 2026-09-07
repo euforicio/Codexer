@@ -694,7 +694,7 @@ private struct TranscriptSkeleton: View {
             RoundedRectangle(cornerRadius: 8)
                 .frame(height: 54)
         }
-        .foregroundStyle(reduceTransparency ? TranscriptPalette.activity : .white.opacity(0.07))
+        .foregroundStyle(reduceTransparency ? TranscriptPalette.activity : .primary.opacity(0.07))
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(TranscriptPalette.background)
@@ -718,10 +718,10 @@ private struct TranscriptBottomPreferenceKey: PreferenceKey {
 }
 
 private enum TranscriptPalette {
-    static let background = Color(red: 0.045, green: 0.052, blue: 0.063)
-    static let userPrompt = Color.white.opacity(0.055)
-    static let activity = Color.white.opacity(0.028)
-    static let border = Color.white.opacity(0.085)
+    static let background = Color(nsColor: .textBackgroundColor)
+    static let userPrompt = Color.primary.opacity(0.055)
+    static let activity = Color.primary.opacity(0.028)
+    static let border = Color.primary.opacity(0.085)
     static let accent = Color(red: 0.32, green: 0.60, blue: 1)
     static let claude = Color(red: 0.82, green: 0.45, blue: 0.28)
     static let assistant = Color(red: 0.62, green: 0.53, blue: 0.96)
@@ -759,7 +759,7 @@ private extension StreamdownTheme {
             background: .clear,
             foreground: .primary,
             secondaryBackground: TranscriptPalette.activity,
-            tertiaryBackground: Color.white.opacity(0.045),
+            tertiaryBackground: Color.primary.opacity(0.045),
             secondaryLabel: .secondary,
             tertiaryLabel: .secondary.opacity(0.78),
             mutedForeground: .secondary,

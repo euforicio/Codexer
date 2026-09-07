@@ -8,6 +8,7 @@ struct ChatsView: View {
     @State private var dateFilter: ChatDateFilter = .all
     @State private var showsMetadata = false
     @State private var metadataCopied = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         Group {
@@ -19,19 +20,32 @@ struct ChatsView: View {
                     description: reason
                 )
             case .available:
-                if model.chatsLoading, model.chatSessions.isEmpty {
+                if model.selectedProfile == nil, model.selectedOfficialProduct == nil {
+                    AgentDockEmptyState(
+                        title: "Choose a Profile",
+                        systemImage: "person.crop.square.stack",
+                        description: "Select a provider app or profile in the sidebar to browse its local conversations.",
+                        actionTitle: "Add Profile",
+                        action: { model.showAddProfile = true }
+                    )
+                } else if model.chatsLoading, model.chatSessions.isEmpty {
                     ProgressView("Reading local chats…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if model.chatSessions.isEmpty {
                     AgentDockEmptyState(
                         title: "No Local Chats",
                         systemImage: "bubble.left.and.bubble.right",
-                        description: "Chats stored for this Codex profile will appear here."
+                        description: emptyChatsDescription,
+                        actionTitle: "Open \(currentProviderName)",
+                        action: openCurrentProvider
                     )
                 } else {
                     browser
                 }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .agentDockFocusSearch)) { _ in
+            searchFocused = true
         }
     }
 
@@ -79,7 +93,26 @@ struct ChatsView: View {
                     TextField("Search chats", text: $searchText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13))
+                        .focused($searchFocused)
+                        .onSubmit {
+                            if let first = filteredSessions.first {
+                                model.selectChat(first.id)
+                            }
+                        }
+                        .onExitCommand { searchText = "" }
                         .accessibilityLabel("Search chats")
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                            searchFocused = true
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear chat search")
+                        .accessibilityLabel("Clear chat search")
+                    }
                 }
                 .padding(.horizontal, 11)
                 .frame(height: 34)
@@ -319,28 +352,45 @@ struct ChatsView: View {
             .frame(width: 1)
     }
 
-    private var listBackground: Color { Color(red: 0.055, green: 0.078, blue: 0.105) }
-    private var chatBackground: Color { Color(red: 0.045, green: 0.065, blue: 0.086) }
-    private var metadataBackground: Color { Color(red: 0.060, green: 0.082, blue: 0.105) }
-    private var controlBackground: Color { Color.white.opacity(0.035) }
-    private var controlBorder: Color { Color.white.opacity(0.09) }
-    private var separatorColor: Color { Color.white.opacity(0.10) }
+    private var listBackground: Color { AgentDockPalette.graphite }
+    private var chatBackground: Color { AgentDockPalette.panel }
+    private var metadataBackground: Color { AgentDockPalette.graphite }
+    private var controlBackground: Color { AgentDockPalette.panel }
+    private var controlBorder: Color { AgentDockPalette.panelBorder }
+    private var separatorColor: Color { AgentDockPalette.divider }
 
     private var filteredSessions: [LocalChatSession] {
-        model.chatSessions.filter { session in
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.chatSessions.filter { session in
             let dateMatches = dateFilter.contains(session.updatedAt)
-            let queryMatches = searchText.isEmpty
-                || session.title.localizedCaseInsensitiveContains(searchText)
-                || session.preview?.localizedCaseInsensitiveContains(searchText) == true
-                || session.repository?.localizedCaseInsensitiveContains(searchText) == true
-                || session.branch?.localizedCaseInsensitiveContains(searchText) == true
-                || session.model?.localizedCaseInsensitiveContains(searchText) == true
+            let queryMatches = query.isEmpty
+                || session.title.localizedCaseInsensitiveContains(query)
+                || session.preview?.localizedCaseInsensitiveContains(query) == true
+                || session.repository?.localizedCaseInsensitiveContains(query) == true
+                || session.branch?.localizedCaseInsensitiveContains(query) == true
+                || session.model?.localizedCaseInsensitiveContains(query) == true
             return dateMatches && queryMatches
         }
     }
 
     private var filtersAreActive: Bool {
-        !searchText.isEmpty || dateFilter != .all
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || dateFilter != .all
+    }
+
+    private var emptyChatsDescription: String {
+        let name = model.selectedProfile?.name ?? "Official \(currentProviderName)"
+        if model.selectedProfile?.product == .claude || model.selectedOfficialProduct == .claude {
+            return "Local Cowork conversations for \(name) will appear here. Synced claude.ai web chats are not available locally."
+        }
+        return "Local conversations for \(name) will appear here after you use \(currentProviderName)."
+    }
+
+    private func openCurrentProvider() {
+        if let profile = model.selectedProfile {
+            model.launch(profile)
+        } else if let product = model.selectedOfficialProduct {
+            model.openStock(product)
+        }
     }
 
     private var currentProviderName: String {
@@ -352,10 +402,17 @@ struct ChatsView: View {
 
     private var groupedSessions: [(title: String, sessions: [LocalChatSession])] {
         let calendar = Calendar.current
-        let today = filteredSessions.filter { calendar.isDateInToday($0.updatedAt) }
-        let yesterday = filteredSessions.filter { calendar.isDateInYesterday($0.updatedAt) }
-        let earlier = filteredSessions.filter {
-            !calendar.isDateInToday($0.updatedAt) && !calendar.isDateInYesterday($0.updatedAt)
+        var today: [LocalChatSession] = []
+        var yesterday: [LocalChatSession] = []
+        var earlier: [LocalChatSession] = []
+        for session in filteredSessions {
+            if calendar.isDateInToday(session.updatedAt) {
+                today.append(session)
+            } else if calendar.isDateInYesterday(session.updatedAt) {
+                yesterday.append(session)
+            } else {
+                earlier.append(session)
+            }
         }
         return [
             ("Today", today),
@@ -513,16 +570,7 @@ private struct ChatSessionRow: View {
             .background {
                 if selected {
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.08, green: 0.27, blue: 0.62),
-                                    Color(red: 0.10, green: 0.36, blue: 0.78)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
+                        .fill(AgentDockPalette.selection)
                 }
             }
         }

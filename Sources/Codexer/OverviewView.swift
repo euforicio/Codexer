@@ -14,7 +14,9 @@ struct OverviewView: View {
         AgentDockEmptyState(
           title: "Choose a Profile",
           systemImage: "person.crop.square.stack",
-          description: "Select a provider app or profile in the sidebar."
+          description: "Select a provider app or profile in the sidebar, or create a profile for another account.",
+          actionTitle: "Add Profile",
+          action: { model.showAddProfile = true }
         )
       }
     }
@@ -31,6 +33,20 @@ private struct ProfileOverview: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 0) {
           header
+
+          if profile.lastLaunchedAt == nil {
+            Label(
+              "Open \(profile.product.displayName), then sign in inside its window to start using this profile.",
+              systemImage: "person.crop.circle.badge.plus"
+            )
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AgentDockPalette.panel, in: .rect(cornerRadius: 8))
+            .padding(.top, 16)
+          }
 
           if profile.product == .codex {
             UsageLimitsCard(
@@ -110,76 +126,18 @@ private struct ProfileOverview: View {
   }
 
   private var header: some View {
-    let status = model.instanceStatus(for: profile)
-    return VStack(spacing: 0) {
-      HStack(spacing: 16) {
-        ProfileIconView(profile: profile, size: 54)
-
-        VStack(alignment: .leading, spacing: 3) {
-          HStack(spacing: 7) {
-            Text(profile.name)
-              .font(.system(size: 24, weight: .semibold))
-              .lineLimit(1)
-              .minimumScaleFactor(0.8)
-            Button {
-              model.showEditProfile = true
-            } label: {
-              Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .semibold))
-                .frame(width: 25, height: 22)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel("Edit Profile")
-          }
-          Text(profile.slug)
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-          HStack(spacing: 10) {
-            StatusDot(isRunning: status.isRunning, size: 8)
-            Text(status.isRunning ? "Running" : "Stopped")
-            Divider().frame(height: 14)
-            Text(lastOpenedText)
-              .lineLimit(1)
-          }
-          .font(.system(size: 12))
-          .foregroundStyle(.secondary)
+    VStack(spacing: 0) {
+      ViewThatFits(in: .horizontal) {
+        HStack(spacing: 16) {
+          profileIdentity
+          Spacer(minLength: 12)
+          profileActions
         }
-
-        Spacer(minLength: 12)
-
-        Button {
-          model.launch(profile)
-        } label: {
-          Label(
-            status.isRunning
-              ? "Focus \(profile.product.displayName)" : "Open \(profile.product.displayName)",
-            systemImage: status.isRunning ? "arrow.up.forward.app.fill" : "play.fill"
-          )
+        VStack(alignment: .leading, spacing: 16) {
+          profileIdentity
+          profileActions
         }
-        .agentDockPrimaryAction()
-        .controlSize(.regular)
-        .keyboardShortcut(.return, modifiers: .command)
-        .disabled(model.isBusy(profile))
-
-        if status.isRunning {
-          Button(role: .destructive) {
-            model.close(profile)
-          } label: {
-            Image(systemName: "stop.fill")
-          }
-          .buttonStyle(.bordered)
-          .controlSize(.regular)
-          .help("Close this profile only")
-          .disabled(model.isBusy(profile))
-        }
-
-        if model.isBusy(profile) {
-          ProgressView()
-            .controlSize(.small)
-            .accessibilityLabel("Updating profile")
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
       .frame(minHeight: 58, alignment: .top)
 
@@ -187,6 +145,88 @@ private struct ProfileOverview: View {
         .overlay(AgentDockPalette.divider)
         .padding(.top, 14)
     }
+  }
+
+  private var profileIdentity: some View {
+    let status = model.instanceStatus(for: profile)
+    return HStack(spacing: 16) {
+      ProfileIconView(profile: profile, size: 54)
+
+      VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 7) {
+          Text(profile.name)
+            .font(.system(size: 24, weight: .semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+          Button {
+            model.showEditProfile = true
+          } label: {
+            Image(systemName: "ellipsis")
+              .font(.system(size: 13, weight: .semibold))
+              .frame(width: 25, height: 22)
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(.secondary)
+          .accessibilityLabel("Edit Profile")
+        }
+        Text("Managed \(profile.product.displayName) profile")
+          .font(.system(size: 12))
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+        HStack(spacing: 10) {
+          StatusDot(isRunning: status.isRunning, size: 8)
+          Text(status.isRunning ? "Running" : "Stopped")
+          Divider().frame(height: 14)
+          Text(lastOpenedText)
+            .lineLimit(1)
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+      }
+    }
+    .frame(minWidth: 230, alignment: .leading)
+  }
+
+  private var profileActions: some View {
+    let status = model.instanceStatus(for: profile)
+    return HStack(spacing: 10) {
+      Button {
+        model.launch(profile)
+      } label: {
+        Label(
+          status.isRunning
+            ? "Focus \(profile.product.displayName)" : "Open \(profile.product.displayName)",
+          systemImage: status.isRunning ? "arrow.up.forward.app.fill" : "play.fill"
+        )
+      }
+      .agentDockPrimaryAction()
+      .controlSize(.regular)
+      .keyboardShortcut(.return, modifiers: .command)
+      .disabled(model.isBusy(profile))
+      .help("\(status.isRunning ? "Focus" : "Open") \(profile.name)")
+      .accessibilityLabel("\(status.isRunning ? "Focus" : "Open") \(profile.name) in \(profile.product.displayName)")
+
+      if status.isRunning {
+        Button(role: .destructive) {
+          model.close(profile)
+        } label: {
+          Image(systemName: "stop.fill")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .help("Close this profile only")
+        .accessibilityLabel("Close \(profile.name) only")
+        .disabled(model.isBusy(profile))
+      }
+
+      if model.isBusy(profile) {
+        ProgressView()
+          .controlSize(.small)
+          .accessibilityLabel("Updating profile")
+      }
+    }
+    .fixedSize()
   }
 
   private var activity: some View {
@@ -216,13 +256,7 @@ private struct ProfileOverview: View {
   }
 
   private var footer: some View {
-    HStack(spacing: 10) {
-      Text("AgentDock.app \(appVersion)")
-      Circle().frame(width: 4, height: 4)
-      Text("Stored locally")
-      Circle().frame(width: 4, height: 4)
-      Text(Date.now.formatted(date: .long, time: .omitted))
-    }
+    Text("AgentDock \(appVersion) · Stored locally")
     .font(.system(size: 11))
     .foregroundStyle(.tertiary)
     .frame(height: 30, alignment: .bottomLeading)
@@ -416,14 +450,47 @@ private struct OfficialOverview: View {
           Button {
             model.openStock(product)
           } label: {
-            Label("Open \(product.displayName)", systemImage: "play.fill")
+            Label(
+              model.stockInstanceStatuses[product]?.isRunning == true
+                ? "Focus \(product.displayName)" : "Open \(product.displayName)",
+              systemImage: model.stockInstanceStatuses[product]?.isRunning == true
+                ? "arrow.up.forward.app.fill" : "play.fill"
+            )
           }
           .buttonStyle(.borderedProminent)
           .controlSize(.regular)
           .disabled(model.busyStockProducts.contains(product))
+          .keyboardShortcut(.return, modifiers: .command)
+          .help("Open or focus the official installation")
+
+          if model.busyStockProducts.contains(product) {
+            ProgressView()
+              .controlSize(.small)
+              .accessibilityLabel("Opening official \(product.displayName)")
+          }
         }
 
         Divider().overlay(AgentDockPalette.divider)
+
+        if model.profiles.isEmpty {
+          SurfaceCard {
+            VStack(alignment: .leading, spacing: 10) {
+              Label("Your accounts, side by side", systemImage: "person.crop.square.stack")
+                .font(.system(size: 16, weight: .semibold))
+              Text("Create a profile for another account. Open it and sign in inside the provider app; each profile keeps its supported app state separate.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+              Button("Add Your First Profile", systemImage: "plus") {
+                model.showAddProfile = true
+              }
+              .agentDockPrimaryAction()
+              .controlSize(.regular)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+          }
+        }
 
         if product == .codex {
           UsageLimitsCard(limits: model.officialCodexRateLimits, accent: AgentDockPalette.blue)

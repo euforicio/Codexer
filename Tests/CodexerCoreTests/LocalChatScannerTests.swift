@@ -216,6 +216,213 @@ final class LocalChatScannerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: index.path))
     }
 
+    func testCodexSummaryBoundsEachSourceAndKeepsFullTranscriptAvailable() throws {
+        let profile = makeProfile("Bounded")
+        let file = try sessionFile(profile: profile, name: "rollout-bounded.jsonl")
+        try writeRecords([
+            sessionMeta(id: "bounded-session"),
+            ["type": "ignored", "payload": ["padding": String(repeating: "a", count: 2_048)]],
+            message(role: "user", text: "Message beyond summary budget", second: 1)
+        ], to: file)
+        let scanner = LocalChatScanner(maximumSummaryLineBytes: 1_024, indexRootURL: indexRoot)
+
+        let result = scanner.scan(profile: profile)
+        let session = try XCTUnwrap(result.sessions.first)
+
+        XCTAssertEqual(result.sessions.count, 1)
+        XCTAssertEqual(session.id, "bounded-session")
+        XCTAssertEqual(session.title, "Untitled chat")
+        XCTAssertTrue(allEntries(scanner: scanner, session: session).contains {
+            $0.message?.text == "Message beyond summary budget"
+        })
+    }
+
+    func testCodexSummaryBoundsAggregateReadBytesWithoutDroppingSessions() throws {
+        let profile = makeProfile("Aggregate")
+        for index in 0..<3 {
+            let file = try sessionFile(profile: profile, name: "rollout-\(index).jsonl")
+            try writeRecords([
+                ["type": "ignored", "payload": ["padding": String(repeating: "a", count: 2_048)]],
+                message(role: "user", text: "Message beyond budget", second: 1)
+            ], to: file)
+        }
+        let scanner = LocalChatScanner(
+            maximumMetadataBytes: 1_024,
+            indexRootURL: indexRoot
+        )
+        let result = scanner.scan(profile: profile)
+
+        XCTAssertEqual(result.sessions.count, 3)
+        XCTAssertTrue(result.sessions.allSatisfy { $0.title == "Untitled chat" })
+        XCTAssertEqual(result.diagnostics.parsedFileCount, 1)
+        XCTAssertEqual(scanner.scan(profile: profile).diagnostics.parsedFileCount, 1)
+        XCTAssertEqual(scanner.scan(profile: profile).diagnostics.parsedFileCount, 1)
+        XCTAssertEqual(scanner.scan(profile: profile).diagnostics.cacheHitCount, 3)
+    }
+
+    func testManagedCacheDoesNotReuseMetadataAfterSourceRootChanges() throws {
+        let original = makeProfile("Original")
+        var replacement = makeProfile("Replacement")
+        replacement.id = original.id
+        let originalFile = try sessionFile(profile: original, name: "rollout-shared.jsonl")
+        let replacementFile = try sessionFile(profile: replacement, name: "rollout-shared.jsonl")
+        try writeRecords([
+            sessionMeta(id: "shared-session"),
+            message(role: "user", text: "Account A", second: 1)
+        ], to: originalFile)
+        try writeRecords([
+            sessionMeta(id: "shared-session"),
+            message(role: "user", text: "Account B", second: 1)
+        ], to: replacementFile)
+        let modifiedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        for file in [originalFile, replacementFile] {
+            try FileManager.default.setAttributes(
+                [.modificationDate: modifiedAt],
+                ofItemAtPath: file.path
+            )
+        }
+        let scanner = makeScanner()
+        XCTAssertEqual(scanner.scan(profile: original).sessions.first?.title, "Account A")
+
+        let result = scanner.scan(profile: replacement)
+
+        XCTAssertEqual(result.sessions.first?.title, "Account B")
+        XCTAssertEqual(result.diagnostics.parsedFileCount, 1)
+        XCTAssertEqual(result.diagnostics.cacheHitCount, 0)
+    }
+
+    func testDuplicateCachedPathsAreDiscardedAndRebuilt() throws {
+        let profile = makeProfile("Duplicate")
+        let file = try sessionFile(profile: profile, name: "rollout-duplicate.jsonl")
+        try writeRecords([
+            sessionMeta(id: "duplicate-session"),
+            message(role: "user", text: "Original content", second: 1)
+        ], to: file)
+        let scanner = makeScanner()
+        XCTAssertEqual(scanner.scan(profile: profile).sessions.count, 1)
+        let index = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: indexRoot,
+            includingPropertiesForKeys: nil
+        ).first)
+        var document = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any]
+        )
+        let records = try XCTUnwrap(document["records"] as? [[String: Any]])
+        document["records"] = records + records
+        try JSONSerialization.data(withJSONObject: document).write(to: index)
+
+        let result = scanner.scan(profile: profile)
+
+        XCTAssertEqual(result.sessions.map(\.title), ["Original content"])
+        XCTAssertEqual(result.diagnostics.parsedFileCount, 1)
+    }
+
+    func testUnchangedScanDoesNotRewriteDurableIndex() throws {
+        let profile = makeProfile("Unchanged")
+        let file = try sessionFile(profile: profile, name: "rollout-unchanged.jsonl")
+        try writeRecords([
+            sessionMeta(id: "unchanged-session"),
+            message(role: "user", text: "Stable content", second: 1)
+        ], to: file)
+        let scanner = makeScanner()
+        XCTAssertEqual(scanner.scan(profile: profile).sessions.count, 1)
+        let index = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: indexRoot,
+            includingPropertiesForKeys: nil
+        ).first)
+        let modifiedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        try FileManager.default.setAttributes(
+            [.modificationDate: modifiedAt],
+            ofItemAtPath: index.path
+        )
+
+        XCTAssertEqual(scanner.scan(profile: profile).diagnostics.cacheHitCount, 1)
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: index.path)[.modificationDate] as? Date,
+            modifiedAt
+        )
+    }
+
+    func testCachedTimestampRoundTripDoesNotReportUnchangedTranscriptAsChanged() throws {
+        let profile = makeProfile("Cached Transcript")
+        let file = try sessionFile(profile: profile, name: "rollout-cached.jsonl")
+        try writeRecords([
+            sessionMeta(id: "cached-session"),
+            message(role: "user", text: "Stable conversation", second: 1)
+        ], to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_800_000_000.1234567)],
+            ofItemAtPath: file.path
+        )
+        let scanner = makeScanner()
+        _ = scanner.scan(profile: profile)
+        let cached = scanner.scan(profile: profile)
+        XCTAssertEqual(cached.diagnostics.cacheHitCount, 1)
+        let session = try XCTUnwrap(cached.sessions.first)
+
+        let page = scanner.loadTranscriptForwardPage(for: session)
+        XCTAssertFalse(page.sourceChanged)
+        XCTAssertTrue(page.entries.contains { $0.text == "Stable conversation" })
+    }
+
+    func testWarmScanRejectsCachedSourceReplacedWithSymlink() throws {
+        let profile = makeProfile("Replaced Source")
+        let file = try sessionFile(profile: profile, name: "rollout-replaced.jsonl")
+        try writeRecords([
+            sessionMeta(id: "replaced-session"),
+            message(role: "user", text: "Original conversation", second: 1)
+        ], to: file)
+        let scanner = makeScanner()
+        _ = scanner.scan(profile: profile)
+        let warm = scanner.scan(profile: profile)
+        XCTAssertEqual(warm.diagnostics.cacheHitCount, 1)
+        let session = try XCTUnwrap(warm.sessions.first)
+
+        let movedFile = root.appendingPathComponent("outside-session.jsonl")
+        try FileManager.default.moveItem(at: file, to: movedFile)
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: movedFile)
+
+        let replaced = scanner.scan(profile: profile)
+        XCTAssertTrue(replaced.sessions.isEmpty)
+        XCTAssertEqual(replaced.diagnostics.cacheHitCount, 0)
+        XCTAssertEqual(replaced.diagnostics.sourceFileCount, 0)
+        let page = scanner.loadTranscriptPage(for: session)
+        XCTAssertEqual(page.entries.map(\.kind), [.error])
+
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: movedFile, to: file)
+        let restored = scanner.scan(profile: profile)
+        XCTAssertEqual(restored.sessions.map(\.id), ["replaced-session"])
+        XCTAssertEqual(restored.diagnostics.parsedFileCount, 1)
+    }
+
+    func testWarmScanRevalidatesSessionRootAfterSymlinkReplacement() throws {
+        let profile = makeProfile("Replaced Root")
+        let file = try sessionFile(profile: profile, name: "rollout-root.jsonl")
+        try writeRecords([
+            sessionMeta(id: "root-session"),
+            message(role: "user", text: "Original conversation", second: 1)
+        ], to: file)
+        let scanner = makeScanner()
+        _ = scanner.scan(profile: profile)
+        XCTAssertEqual(scanner.scan(profile: profile).diagnostics.cacheHitCount, 1)
+        let sessionsRoot = profile.codexHomePath.appendingPathComponent("sessions", isDirectory: true)
+        let movedRoot = root.appendingPathComponent("outside-sessions", isDirectory: true)
+        try FileManager.default.moveItem(at: sessionsRoot, to: movedRoot)
+        try FileManager.default.createSymbolicLink(at: sessionsRoot, withDestinationURL: movedRoot)
+
+        let replaced = scanner.scan(profile: profile)
+        XCTAssertTrue(replaced.sessions.isEmpty)
+        XCTAssertEqual(replaced.diagnostics.cacheHitCount, 0)
+        XCTAssertEqual(replaced.diagnostics.sourceFileCount, 0)
+
+        try FileManager.default.removeItem(at: sessionsRoot)
+        try FileManager.default.moveItem(at: movedRoot, to: sessionsRoot)
+        let restored = scanner.scan(profile: profile)
+        XCTAssertEqual(restored.sessions.map(\.id), ["root-session"])
+        XCTAssertEqual(restored.diagnostics.parsedFileCount, 1)
+    }
+
     func testTranscriptOverTwentyMegabytesAndOversizedLineRemainVisible() throws {
         let profile = makeProfile("Large")
         let file = try sessionFile(profile: profile, name: "rollout-large.jsonl")

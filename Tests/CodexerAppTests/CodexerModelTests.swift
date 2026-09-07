@@ -86,6 +86,7 @@ final class CodexerModelTests: XCTestCase {
         let second = try store.createProfile(product: .claude, name: "Second")
         let model = CodexerModel(
             store: store,
+            officialDataRootURL: root.appendingPathComponent("Official"),
             codexAppURL: URL(fileURLWithPath: "/Applications/Codex.app"),
             statsScanner: ProfileStatsScanner(),
             rateLimitClient: AppServerRateLimitClient(
@@ -319,7 +320,8 @@ final class CodexerModelTests: XCTestCase {
     func testOfficialCodexUsesNativeProfileAndKeepsManagedDefaultsIsolated() async throws {
         let store = try makeStore()
         let managed = try store.createProfile(name: "Managed")
-        let officialHome = root.appendingPathComponent("OfficialCodex", isDirectory: true)
+        let officialDataRoot = root.appendingPathComponent("Official", isDirectory: true)
+        let officialHome = officialDataRoot.appendingPathComponent(".codex", isDirectory: true)
         try FileManager.default.createDirectory(at: officialHome, withIntermediateDirectories: true)
         try Data(#"""
         [model_providers.ollama]
@@ -338,13 +340,13 @@ final class CodexerModelTests: XCTestCase {
         let manager = RecordingInstanceManager(stockRunning: true)
         let model = CodexerModel(
             store: store,
+            officialDataRootURL: officialDataRoot,
             codexAppURL: URL(fileURLWithPath: "/Applications/Codex.app"),
             instanceController: manager,
             shortcutInstaller: NoopShortcutManager(),
             statsScanner: FixedStatsScanner(),
             rateLimitClient: FixedRateLimitClient(),
-            preferencesStore: preferencesStore,
-            officialCodexHomeURL: officialHome
+            preferencesStore: preferencesStore
         )
         let ollama = try XCTUnwrap(model.officialCodexConfigProfiles.first)
 
@@ -463,6 +465,7 @@ final class CodexerModelTests: XCTestCase {
         ).write(to: currentSessions.appendingPathComponent("rollout-current.jsonl"))
         let model = CodexerModel(
             store: store,
+            officialDataRootURL: root.appendingPathComponent("Official"),
             codexAppURL: URL(fileURLWithPath: "/Applications/Codex.app"),
             instanceController: RecordingInstanceManager(),
             shortcutInstaller: NoopShortcutManager(),
@@ -516,6 +519,7 @@ final class CodexerModelTests: XCTestCase {
         )
         let model = CodexerModel(
             store: store,
+            officialDataRootURL: root.appendingPathComponent("Official"),
             codexAppURL: URL(fileURLWithPath: "/Applications/Codex.app"),
             instanceController: RecordingInstanceManager(),
             shortcutInstaller: NoopShortcutManager(),
@@ -662,6 +666,7 @@ final class CodexerModelTests: XCTestCase {
 
         let model = CodexerModel(
             store: store,
+            officialDataRootURL: root.appendingPathComponent("Official"),
             codexAppURL: appURL,
             shortcutInstaller: installer,
             startMonitoring: false
@@ -763,6 +768,7 @@ final class CodexerModelTests: XCTestCase {
     private func makeChatModel(store: ProfileStore) -> CodexerModel {
         CodexerModel(
             store: store,
+            officialDataRootURL: root.appendingPathComponent("Official"),
             codexAppURL: URL(fileURLWithPath: "/Applications/Codex.app"),
             instanceController: RecordingInstanceManager(),
             shortcutInstaller: NoopShortcutManager(),
@@ -783,6 +789,7 @@ final class CodexerModelTests: XCTestCase {
     ) -> CodexerModel {
         CodexerModel(
             store: store,
+            officialDataRootURL: root.appendingPathComponent("Official"),
             codexAppURL: URL(fileURLWithPath: "/Applications/Codex.app"),
             claudeAppURL: claudeAppURL,
             instanceController: manager,
@@ -795,6 +802,7 @@ final class CodexerModelTests: XCTestCase {
     private func makeRealModel(store: ProfileStore) -> CodexerModel {
         CodexerModel(
             store: store,
+            officialDataRootURL: root.appendingPathComponent("Official"),
             codexAppURL: URL(fileURLWithPath: "/Applications/Codex.app"),
             claudeAppURL: URL(fileURLWithPath: "/Applications/Claude.app"),
             instanceController: DesktopInstanceController(),

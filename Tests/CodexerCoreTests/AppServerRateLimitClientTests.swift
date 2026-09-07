@@ -3,6 +3,33 @@ import XCTest
 @testable import CodexerCore
 
 final class AppServerRateLimitClientTests: XCTestCase {
+    func testNativeQuotaEnvironmentUsesSelectedLoginAndRejectsInheritedRouting() {
+        let home = URL(fileURLWithPath: "/synthetic/profile/CODEX_HOME")
+        let executable = URL(fileURLWithPath: "/synthetic/Codex.app/Contents/Resources/codex")
+        let environment = AppServerRateLimitClient.launchEnvironment(
+            codexHomeURL: home,
+            codexExecutable: executable,
+            inherited: [
+                "CODEX_HOME": "/synthetic/other-account",
+                "CODEX_CLI_PATH": "/synthetic/other-cli",
+                "CODEX_APP_SERVER_WS_URL": "ws://127.0.0.1:9000",
+                "CODEX_APP_SERVER_OPENAI_BASE_URL": "https://example.invalid",
+                "CODEX_API_ENDPOINT": "https://example.invalid",
+                "OPENAI_API_KEY": "synthetic-other-account-key",
+                "OPENAI_BASE_URL": "https://example.invalid",
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/synthetic/home"
+            ]
+        )
+
+        XCTAssertEqual(environment, [
+            "CODEX_HOME": home.path,
+            "CODEX_CLI_PATH": executable.path,
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/synthetic/home"
+        ])
+    }
+
     private var root: URL!
 
     override func setUpWithError() throws {

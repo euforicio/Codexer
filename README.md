@@ -99,6 +99,10 @@ The action changes to **Focus** while a profile is running. **Close** targets
 only the selected profile. **Remove From List** preserves its local data;
 permanent deletion is a separate confirmed action.
 
+Use **Command-F** to search the current profile or chat list,
+**Command-Shift-F** to search profiles from anywhere, and **Command-R** to
+refresh. The selected profile remains visible above each detail section.
+
 ## Local Data and Privacy
 
 AgentDock is local-first. It does not provide cloud synchronization or upload

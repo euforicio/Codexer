@@ -61,8 +61,35 @@ are not persisted, logged, surfaced in raw errors, or included in analytics.
 Responses are time- and size-bounded. A failed custom-provider request fails
 closed instead of exposing the profile's unrelated OpenAI account quota.
 
-Codex launches preserve the ordinary parent environment, but AgentDock does
-not trust inherited profile-selection values. Built-in launches set
+Provider launches discard inherited app-profile, app-server routing, and
+Electron/Node runtime overrides before supplying the selected profile's paths.
+Managed Codex launches pin both `CODEX_HOME` and
+`CODEX_ELECTRON_USER_DATA_PATH`, as well as the matching `--user-data-dir`.
+The Electron variable also activates the installed app's preservation of
+`CODEX_HOME` across its login-shell environment reload. Stock launches clear
+managed profile selectors. Managed Claude launches also pair their verified
+`CLAUDE_USER_DATA_DIR` override with a matching `--user-data-dir` argument,
+covering Chromium session storage from process startup.
+
+The native OpenAI quota reader additionally removes inherited account, API
+credential, and endpoint overrides so they cannot redirect the selected
+account's usage request. Custom-provider usage requests retain the explicit
+environment-backed authentication configured for that provider.
+
+Ordinary shell variables and shared shell startup files remain host resources.
+The provider can reload that shell environment after startup; launch-time
+sanitization is not an operating-system enforcement boundary.
+
+Provider namespace directories cannot be registered as individual profiles or
+replayed as profile deletions. Persisted shortcuts must be distinct `.app`
+paths whose normalized name matches the owning profile slug. Recovery journals
+cannot claim another profile's directory or shortcut.
+Process discovery rejects ambiguous profile arguments and bundle-prefix
+lookalikes before lifecycle operations revalidate the process identity. Profile
+locks resolve path aliases to one physical root and reject symlinked,
+nonregular, multiply linked, or foreign-owned lock files.
+
+Built-in Codex launches set
 `CODEX_CLI_PATH` to the validated Codex app's bundled
 `Contents/Resources/codex` executable. Named config-profile launches point it
 to AgentDock's signed proxy, which validates the profile-local bounded regular
@@ -95,8 +122,11 @@ and usage endpoints. Tokens are held only for the request; AgentDock never
 copies them into its own storage, refreshes or rotates them, includes them in
 analytics, or logs them. Background reads forbid Keychain interaction; a manual
 refresh may show the system access prompt. Managed profiles resolve credentials
-only from their own Desktop user-data roots, and every response is verified
-against its account and organization before display.
+only from their own Desktop user-data roots. Desktop usage requires a valid
+account and organization identity, and responses are verified against that
+identity before display. An explicit identity mismatch clears the corresponding
+cached quota instead of showing stale data. Active-organization cookie database
+reads enforce the same root containment and symlink checks as other databases.
 
 ## Repository and Release Hygiene
 

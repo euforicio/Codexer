@@ -395,6 +395,32 @@ final class LocalChatSessionTests: XCTestCase {
         XCTAssertEqual(firstRead.map(\.id), secondRead.map(\.id))
     }
 
+    func testClaudeUsageSkipsOversizedCompleteLinesAndContinuesReading() throws {
+        try makeCoworkFixture(auditRecords: [
+            [
+                "type": "assistant",
+                "message": [
+                    "id": "oversized-message",
+                    "usage": ["input_tokens": 100],
+                    "content": String(repeating: "a", count: 1_024)
+                ]
+            ],
+            [
+                "type": "assistant",
+                "message": ["id": "bounded-message", "usage": ["input_tokens": 7]]
+            ]
+        ])
+        let scanner = LocalChatScanner(
+            maximumSummaryLineBytes: 512,
+            indexRootURL: root.appendingPathComponent("Indexes")
+        )
+
+        let result = scanner.scanOfficialClaude(claudeHomeURL: root)
+
+        XCTAssertEqual(result.sessions.count, 1)
+        XCTAssertEqual(result.sessions.first?.tokenCount, 7)
+    }
+
     func testClaudeInventoryBoundsFilesAndAggregateMetadataBytes() throws {
         for index in 0..<5 {
             try makeCoworkFixture(

@@ -2,6 +2,61 @@ import XCTest
 @testable import CodexerCore
 
 final class ClaudeDesktopTests: XCTestCase {
+    func testLaunchRejectsExistingAndInvalidReturnedProcessIdentifiers() throws {
+        let existing: Set<Int32> = [101, 202]
+        for processID in existing {
+            XCTAssertThrowsError(try ClaudeInstanceController.validateLaunchedProcessID(
+                processID,
+                existingProcessIDs: existing
+            )) { error in
+                XCTAssertEqual(error as? ClaudeLauncherError, .launchReturnedExistingProcess(processID))
+            }
+        }
+        XCTAssertThrowsError(try ClaudeInstanceController.validateLaunchedProcessID(
+            0,
+            existingProcessIDs: existing
+        )) { error in
+            XCTAssertEqual(error as? ClaudeLauncherError, .launchDidNotReturnProcess)
+        }
+        XCTAssertNoThrow(try ClaudeInstanceController.validateLaunchedProcessID(
+            303,
+            existingProcessIDs: existing
+        ))
+    }
+
+    func testLaunchEnvironmentsDiscardInheritedProfileAndRuntimeSelection() {
+        let inherited = [
+            "CLAUDE_USER_DATA_DIR": "/tmp/wrong-desktop",
+            "CLAUDE_CONFIG_DIR": "/tmp/wrong-config",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/tmp/wrong-credentials",
+            "CODEX_HOME": "/tmp/other-provider",
+            "CODEX_CLI_PATH": "/tmp/other-cli",
+            "CODEX_ELECTRON_USER_DATA_PATH": "/tmp/other-desktop",
+            "ELECTRON_RUN_AS_NODE": "1",
+            "NODE_OPTIONS": "--require=/tmp/other-profile.js",
+            "NODE_PATH": "/tmp/other-modules",
+            "HOME": "/tmp/shared-home",
+            "PATH": "/usr/bin:/bin",
+            "CUSTOM_PROVIDER_TOKEN": "configured-value"
+        ]
+
+        for selectedPath in ["/tmp/selected/UserData", nil] {
+            let environment = ClaudeInstanceController.launchEnvironment(
+                inheriting: inherited,
+                userDataPath: selectedPath
+            )
+            XCTAssertEqual(environment["CLAUDE_USER_DATA_DIR"], selectedPath)
+            for key in ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CODEX_HOME",
+                        "CODEX_CLI_PATH", "CODEX_ELECTRON_USER_DATA_PATH", "ELECTRON_RUN_AS_NODE",
+                        "NODE_OPTIONS", "NODE_PATH"] {
+                XCTAssertNil(environment[key])
+            }
+            XCTAssertEqual(environment["HOME"], inherited["HOME"])
+            XCTAssertEqual(environment["PATH"], inherited["PATH"])
+            XCTAssertEqual(environment["CUSTOM_PROVIDER_TOKEN"], inherited["CUSTOM_PROVIDER_TOKEN"])
+        }
+    }
+
     func testRegistryPinsClaudePublisherIdentity() {
         XCTAssertEqual(DesktopAppRegistry.claude.bundleIdentifier, "com.anthropic.claudefordesktop")
         XCTAssertEqual(DesktopAppRegistry.claude.teamIdentifier, "Q6L2SF6YDW")
@@ -121,6 +176,33 @@ final class ClaudeDesktopTests: XCTestCase {
             ),
             [300]
         )
+    }
+
+    func testDiscoveryRejectsEmbeddedArgumentsAndConflictingProfileRoots() {
+        let appURL = URL(fileURLWithPath: "/Applications/Claude.app")
+        let selected = URL(fileURLWithPath: "/tmp/Selected Profile/UserData")
+        let other = URL(fileURLWithPath: "/tmp/Other Profile/UserData")
+        let executable = "/Applications/Claude.app/Contents/MacOS/Claude"
+        let helper = "/Applications/Claude.app/Contents/Frameworks/Claude Helper"
+        let snapshot = ClaudeProcessSnapshot(text: """
+        100 1 \(executable)
+        101 100 \(helper) --diagnostic=--user-data-dir=\(selected.path)
+        200 1 \(executable)
+        201 200 \(helper) --user-data-dir=\(selected.path) --user-data-dir=\(other.path)
+        300 1 \(executable)
+        301 300 /Applications/Claude.app/Contents-other/Helper --user-data-dir=\(selected.path)
+        400 1 \(executable)
+        401 400 \(helper) --user-data-dir=\(selected.path)
+        402 400 \(helper) --user-data-dir=\(other.path)
+        """)
+
+        for profile in [selected, other] {
+            XCTAssertTrue(ClaudeInstanceDiscovery.profileMainProcessIDs(
+                in: snapshot,
+                appURL: appURL,
+                userDataURL: profile
+            ).isEmpty)
+        }
     }
 
     func testClaudeProfilesUseProductScopedStateAndPreserveCodexLayout() throws {
