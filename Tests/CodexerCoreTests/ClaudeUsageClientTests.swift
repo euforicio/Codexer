@@ -2,6 +2,40 @@ import XCTest
 @testable import CodexerCore
 
 final class ClaudeUsageClientTests: XCTestCase {
+    func testDesktopCredentialRequiresExplicitAccountAndOrganizationIdentity() {
+        let account = "00000000-0000-0000-0000-000000000001"
+        let organization = "00000000-0000-0000-0000-000000000002"
+
+        XCTAssertEqual(
+            ClaudeAccountIdentity.desktop(accountUUID: account, organizationUUID: organization),
+            ClaudeAccountIdentity(accountUUID: account, organizationUUID: organization)
+        )
+        XCTAssertNil(ClaudeAccountIdentity.desktop(accountUUID: nil, organizationUUID: organization))
+        XCTAssertNil(ClaudeAccountIdentity.desktop(accountUUID: "", organizationUUID: organization))
+        XCTAssertNil(ClaudeAccountIdentity.desktop(accountUUID: "invalid", organizationUUID: organization))
+        XCTAssertNil(ClaudeAccountIdentity.desktop(accountUUID: account, organizationUUID: "invalid"))
+    }
+
+    func testCredentialCacheSeparatesAccountAndOrganizationForTheSameToken() {
+        let identity = ClaudeAccountIdentity(
+            accountUUID: "00000000-0000-0000-0000-000000000001",
+            organizationUUID: "00000000-0000-0000-0000-000000000002"
+        )
+        let original = ClaudeUsageCredential(
+            accessToken: "synthetic-token",
+            scopes: ["user:profile"],
+            identity: identity
+        )
+        var otherAccount = original
+        otherAccount.identity?.accountUUID = "00000000-0000-0000-0000-000000000003"
+        var otherOrganization = original
+        otherOrganization.identity?.organizationUUID = "00000000-0000-0000-0000-000000000004"
+
+        XCTAssertNotEqual(original.cacheKey, otherAccount.cacheKey)
+        XCTAssertNotEqual(original.cacheKey, otherOrganization.cacheKey)
+        XCTAssertFalse(original.cacheKey.contains(original.accessToken))
+    }
+
     func testInstalledOfficialUsageWhenEnabled() async throws {
         guard ProcessInfo.processInfo.environment["AGENTDOCK_LIVE_CLAUDE_USAGE_TEST"] == "1" else {
             throw XCTSkip("Set AGENTDOCK_LIVE_CLAUDE_USAGE_TEST=1 to validate the signed-in official account.")

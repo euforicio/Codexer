@@ -502,7 +502,8 @@ public struct LocalChatScanner: @unchecked Sendable {
         let endOffset = min(cursor?.byteOffset ?? snapshotSize, currentSize)
         let sourceChanged = cursor.map {
             $0.sourceSize != currentSize || $0.sourceModifiedAt != currentModifiedAt
-        } ?? (session.sourceSize != currentSize || session.sourceModifiedAt != currentModifiedAt)
+        } ?? (session.sourceSize != currentSize
+            || !Self.sameModificationDate(session.sourceModifiedAt, currentModifiedAt))
 
         guard endOffset > 0 else {
             return LocalChatTranscriptPage(
@@ -739,7 +740,8 @@ public struct LocalChatScanner: @unchecked Sendable {
         return .init(
             entries: entries,
             olderCursor: continuation,
-            sourceChanged: session.sourceSize != size || session.sourceModifiedAt != modifiedAt,
+            sourceChanged: session.sourceSize != size
+                || !Self.sameModificationDate(session.sourceModifiedAt, modifiedAt),
             malformedEventCount: malformed
         )
     }
@@ -996,7 +998,11 @@ public struct LocalChatScanner: @unchecked Sendable {
         var latestUsageLimit: UsageLimitSignal?
         let usageMarker = Data(#""usage""#.utf8)
         let rateLimitMarker = Data(#""rate_limit_event""#.utf8)
-        let completed = forEachForwardLine(at: source.url, under: root) { line in
+        let readResult = forEachForwardLine(
+            at: source.url,
+            under: root,
+            maximumBytes: Int(clamping: source.fileSize)
+        ) { line in
             guard line.range(of: usageMarker) != nil
                 || line.range(of: rateLimitMarker) != nil
             else {
@@ -1061,7 +1067,7 @@ public struct LocalChatScanner: @unchecked Sendable {
             }
             return true
         }
-        guard completed, !Task.isCancelled else { return nil }
+        guard readResult.completed, !Task.isCancelled else { return nil }
         let summary = ClaudeUsageSummary(
             totalTokens: totalTokens,
             latestUsageLimit: latestUsageLimit
@@ -1312,14 +1318,19 @@ public struct LocalChatScanner: @unchecked Sendable {
         profileID: CodexProfile.ID?,
         profileName: String
     ) -> LocalChatScanResult {
+        let canonicalHomeURL = codexHomeURL.resolvingSymlinksInPath().standardizedFileURL
         let scopeKey = profileID.map { "managed-\($0.uuidString.lowercased())" }
             ?? "official-\(String(Self.fnv1a64(codexHomeURL.standardizedFileURL.path), radix: 16))"
-        let cached = loadIndex(scopeKey: scopeKey)
+        let sourceRootKey = String(
+            Self.fnv1a64(canonicalHomeURL.path),
+            radix: 16
+        )
+        let cached = loadIndex(scopeKey: scopeKey, sourceRootKey: sourceRootKey)
         let cachedByPath = Dictionary(uniqueKeysWithValues: cached.records.map {
             ($0.relativePath, $0)
         })
         let databaseRows = indexedRows(codexHomeURL: codexHomeURL)
-        let inventory = sourceInventory(codexHomeURL: codexHomeURL)
+        let inventory = sourceInventory(canonicalHomeURL: canonicalHomeURL)
         guard inventory.rootsExist else {
             return LocalChatScanResult(
                 availability: .available,
@@ -1340,9 +1351,14 @@ public struct LocalChatScanner: @unchecked Sendable {
         )
         var cacheHits = 0
         var parsedFiles = 0
+        var remainingSummaryBytes = maximumMetadataBytes
         var records: [ChatIndexRecord] = []
+        let sources = boundedSources(inventory.files)
+        let sourcesByPath = Dictionary(uniqueKeysWithValues: sources.map {
+            ($0.relativePath, $0)
+        })
 
-        for source in boundedSources(inventory.files) {
+        for source in sources {
             guard !Task.isCancelled else {
                 return LocalChatScanResult(
                     availability: .available,
@@ -1355,6 +1371,7 @@ public struct LocalChatScanner: @unchecked Sendable {
                 cacheHits += cachedByPath[source.relativePath] == nil ? 0 : 1
             } else if
                 let existing = cachedByPath[source.relativePath],
+                existing.summaryComplete != false,
                 existing.fileSize == source.fileSize,
                 Self.sameModificationDate(existing.modifiedAt, source.modifiedAt),
                 existing.status == source.status
@@ -1362,23 +1379,32 @@ public struct LocalChatScanner: @unchecked Sendable {
                 records.append(existing)
                 cacheHits += 1
             } else {
-                records.append(summaryRecord(source: source))
-                parsedFiles += 1
+                let summary = summaryRecord(source: source, maximumBytes: remainingSummaryBytes)
+                records.append(summary.record)
+                remainingSummaryBytes -= summary.bytesRead
+                if summary.bytesRead > 0 { parsedFiles += 1 }
             }
         }
 
         var seenIDs: Set<String> = []
         records = records.filter { seenIDs.insert($0.id).inserted }
         records = boundedRecords(records)
-        saveIndex(
-            ChatIndexDocument(version: Self.indexVersion, scopeKey: scopeKey, records: records),
-            scopeKey: scopeKey
+        let document = ChatIndexDocument(
+            version: Self.indexVersion,
+            scopeKey: scopeKey,
+            sourceRootKey: sourceRootKey,
+            records: records
         )
+        if document != cached {
+            saveIndex(document, scopeKey: scopeKey)
+        }
 
-        let sessions = records.compactMap {
-            session(
-                record: $0,
-                codexHomeURL: codexHomeURL,
+        let sessions = records.compactMap { record -> LocalChatSession? in
+            guard let source = sourcesByPath[record.relativePath] else { return nil }
+            return session(
+                record: record,
+                source: source,
+                codexHomeURL: canonicalHomeURL,
                 profileID: profileID,
                 profileName: profileName
             )
@@ -1397,13 +1423,14 @@ public struct LocalChatScanner: @unchecked Sendable {
         )
     }
 
-    private func sourceInventory(codexHomeURL: URL) -> SourceInventory {
+    private func sourceInventory(canonicalHomeURL: URL) -> SourceInventory {
         let roots = [
-            (codexHomeURL.appendingPathComponent("sessions", isDirectory: true), "Unknown"),
-            (codexHomeURL.appendingPathComponent("archived_sessions", isDirectory: true), "Archived")
+            (canonicalHomeURL.appendingPathComponent("sessions", isDirectory: true), "Unknown"),
+            (canonicalHomeURL.appendingPathComponent("archived_sessions", isDirectory: true), "Archived")
         ]
+        let homePrefix = canonicalHomeURL.path + "/"
         let keys: Set<URLResourceKey> = [
-            .isRegularFileKey, .fileSizeKey, .contentModificationDateKey
+            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey
         ]
         var files: [SourceFile] = []
         var tokenParts: [String] = []
@@ -1413,8 +1440,11 @@ public struct LocalChatScanner: @unchecked Sendable {
 
         inventory: for (root, status) in roots where fileManager.fileExists(atPath: root.path) {
             rootsExist = true
+            let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL
+            guard canonicalRoot.path == root.path else { continue }
+            let rootPrefix = canonicalRoot.path + "/"
             guard let enumerator = fileManager.enumerator(
-                at: root,
+                at: canonicalRoot,
                 includingPropertiesForKeys: Array(keys),
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
             ) else {
@@ -1431,14 +1461,26 @@ public struct LocalChatScanner: @unchecked Sendable {
                 guard
                     let values = try? url.resourceValues(forKeys: keys),
                     values.isRegularFile == true,
-                    let relativePath = relativePath(for: url, under: codexHomeURL)
+                    values.isSymbolicLink != true,
+                    let fileSize = values.fileSize,
+                    fileSize >= 0
                 else {
                     continue
                 }
-                let size = UInt64(max(0, values.fileSize ?? 0))
+                let standardized = url.standardizedFileURL
+                let canonicalURL = standardized.resolvingSymlinksInPath().standardizedFileURL
+                guard
+                    canonicalURL.path == standardized.path,
+                    canonicalURL.path.hasPrefix(rootPrefix),
+                    canonicalURL.path.hasPrefix(homePrefix)
+                else {
+                    continue
+                }
+                let relativePath = String(canonicalURL.path.dropFirst(homePrefix.count))
+                let size = UInt64(fileSize)
                 let modifiedAt = values.contentModificationDate ?? .distantPast
                 files.append(.init(
-                    url: url,
+                    url: canonicalURL,
                     relativePath: relativePath,
                     fileSize: size,
                     modifiedAt: modifiedAt,
@@ -1448,7 +1490,7 @@ public struct LocalChatScanner: @unchecked Sendable {
             }
         }
         for name in ["state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm"] {
-            let url = codexHomeURL.appendingPathComponent(name)
+            let url = canonicalHomeURL.appendingPathComponent(name)
             if let values = try? url.resourceValues(
                 forKeys: [.fileSizeKey, .contentModificationDateKey]
             ) {
@@ -1470,7 +1512,9 @@ public struct LocalChatScanner: @unchecked Sendable {
     private func sourceChangeToken(codexHomeURL: URL) -> String {
         let database = codexHomeURL.appendingPathComponent("state_5.sqlite")
         guard fileManager.fileExists(atPath: database.path) else {
-            return sourceInventory(codexHomeURL: codexHomeURL).changeToken
+            return sourceInventory(
+                canonicalHomeURL: codexHomeURL.resolvingSymlinksInPath().standardizedFileURL
+            ).changeToken
         }
         var parts: [String] = []
         for name in [
@@ -1489,7 +1533,10 @@ public struct LocalChatScanner: @unchecked Sendable {
         return String(Self.fnv1a64(parts.sorted().joined(separator: "\n")), radix: 16)
     }
 
-    private func summaryRecord(source: SourceFile) -> ChatIndexRecord {
+    private func summaryRecord(
+        source: SourceFile,
+        maximumBytes: Int
+    ) -> (record: ChatIndexRecord, bytesRead: Int) {
         var sessionID: String?
         var firstUserMessage: String?
         var startedAt: Date?
@@ -1499,8 +1546,12 @@ public struct LocalChatScanner: @unchecked Sendable {
         var model: String?
         var tokenCount: Int?
         var status = source.status
+        let sourceBudget = min(maximumSummaryLineBytes, maximumMetadataBytes)
 
-        _ = forEachForwardLine(at: source.url) { line in
+        let readResult = forEachForwardLine(
+            at: source.url,
+            maximumBytes: min(sourceBudget, maximumBytes)
+        ) { line in
             guard
                 let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                 let type = object["type"] as? String,
@@ -1561,7 +1612,7 @@ public struct LocalChatScanner: @unchecked Sendable {
         let safeID = Self.cleanIdentifier(sessionID)
             ?? "local-\(String(Self.fnv1a64(source.relativePath), radix: 16))"
         let title = Self.title(from: firstUserMessage)
-        return ChatIndexRecord(
+        let record = ChatIndexRecord(
             relativePath: source.relativePath,
             fileSize: source.fileSize,
             modifiedAt: source.modifiedAt,
@@ -1574,8 +1625,11 @@ public struct LocalChatScanner: @unchecked Sendable {
             startedAt: startedAt ?? source.modifiedAt,
             updatedAt: updatedAt,
             tokenCount: tokenCount,
-            status: status
+            status: status,
+            summaryComplete: firstUserMessage != nil
+                || maximumBytes >= min(sourceBudget, Int(clamping: source.fileSize))
         )
+        return (record, readResult.bytesRead)
     }
 
     private func indexedRows(codexHomeURL: URL) -> [ChatIndexRecord] {
@@ -1686,7 +1740,8 @@ public struct LocalChatScanner: @unchecked Sendable {
                 startedAt: createdAt,
                 updatedAt: updatedAt,
                 tokenCount: Self.intValue(row["tokens_used"]),
-                status: source.status
+                status: source.status,
+                summaryComplete: true
             )
         }
     }
@@ -2115,8 +2170,10 @@ public struct LocalChatScanner: @unchecked Sendable {
         under root: URL? = nil,
         maximumBytes: Int? = nil,
         body: (Data) -> Bool
-    ) -> Bool {
-        guard let handle = openNoFollowRegularFile(at: url, under: root) else { return false }
+    ) -> (completed: Bool, bytesRead: Int) {
+        guard maximumBytes.map({ $0 > 0 }) ?? true,
+              let handle = openNoFollowRegularFile(at: url, under: root)
+        else { return (false, 0) }
         defer { try? handle.close() }
         var buffer = Data()
         var discardingOversized = false
@@ -2125,12 +2182,12 @@ public struct LocalChatScanner: @unchecked Sendable {
             let remaining = maximumBytes.map { $0 - bytesRead }
             guard remaining.map({ $0 > 0 }) ?? true else {
                 if !discardingOversized, !buffer.isEmpty { _ = body(buffer) }
-                return true
+                return (true, bytesRead)
             }
             let count = min(64 * 1_024, remaining ?? (64 * 1_024))
             guard let chunk = try? handle.read(upToCount: count), !chunk.isEmpty else {
                 if !discardingOversized, !buffer.isEmpty { _ = body(buffer) }
-                return true
+                return (true, bytesRead)
             }
             bytesRead += chunk.count
             var cursor = chunk.startIndex
@@ -2141,8 +2198,11 @@ public struct LocalChatScanner: @unchecked Sendable {
             }
             while cursor < chunk.endIndex {
                 if let newline = chunk[cursor...].firstIndex(of: 0x0A) {
-                    buffer.append(chunk[cursor..<newline])
-                    if !buffer.isEmpty, !body(buffer) { return true }
+                    let lineBytes = chunk.distance(from: cursor, to: newline)
+                    if lineBytes <= maximumSummaryLineBytes - buffer.count {
+                        buffer.append(chunk[cursor..<newline])
+                        if !buffer.isEmpty, !body(buffer) { return (true, bytesRead) }
+                    }
                     buffer.removeAll(keepingCapacity: true)
                     cursor = chunk.index(after: newline)
                 } else {
@@ -2155,7 +2215,7 @@ public struct LocalChatScanner: @unchecked Sendable {
                 }
             }
         }
-        return false
+        return (false, bytesRead)
     }
 
     private func readRange(handle: FileHandle, start: UInt64, end: UInt64) -> Data? {
@@ -2332,12 +2392,11 @@ public struct LocalChatScanner: @unchecked Sendable {
 
     private func session(
         record: ChatIndexRecord,
+        source: SourceFile,
         codexHomeURL: URL,
         profileID: CodexProfile.ID?,
         profileName: String
-    ) -> LocalChatSession? {
-        let url = codexHomeURL.appendingPathComponent(record.relativePath).standardizedFileURL
-        guard safeSessionURL(path: url.path, codexHomeURL: codexHomeURL) != nil else { return nil }
+    ) -> LocalChatSession {
         return LocalChatSession(
             id: record.id,
             provider: .codex,
@@ -2352,10 +2411,10 @@ public struct LocalChatScanner: @unchecked Sendable {
             updatedAt: record.updatedAt,
             tokenCount: record.tokenCount,
             status: record.status,
-            sourceURL: url,
+            sourceURL: source.url,
             sourceRootURL: codexHomeURL,
-            sourceSize: record.fileSize,
-            sourceModifiedAt: record.modifiedAt
+            sourceSize: source.fileSize,
+            sourceModifiedAt: source.modifiedAt
         )
     }
 
@@ -2421,7 +2480,7 @@ public struct LocalChatScanner: @unchecked Sendable {
         return String(path.dropFirst(base.count))
     }
 
-    private func loadIndex(scopeKey: String) -> ChatIndexDocument {
+    private func loadIndex(scopeKey: String, sourceRootKey: String) -> ChatIndexDocument {
         let url = indexURL(scopeKey: scopeKey)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
@@ -2437,12 +2496,15 @@ public struct LocalChatScanner: @unchecked Sendable {
             let document = try? decoder.decode(ChatIndexDocument.self, from: data),
             document.version == Self.indexVersion,
             document.scopeKey == scopeKey,
+            document.sourceRootKey == sourceRootKey,
             document.records.count <= maximumSessions,
+            Set(document.records.map(\.relativePath)).count == document.records.count,
             document.records.allSatisfy(Self.isValidCachedRecord)
         else {
             return ChatIndexDocument(
                 version: Self.indexVersion,
                 scopeKey: scopeKey,
+                sourceRootKey: sourceRootKey,
                 records: []
             )
         }
@@ -2556,9 +2618,10 @@ public struct LocalChatScanner: @unchecked Sendable {
         let status: String
     }
 
-    private struct ChatIndexDocument: Codable {
+    private struct ChatIndexDocument: Codable, Equatable {
         let version: Int
         let scopeKey: String
+        let sourceRootKey: String?
         let records: [ChatIndexRecord]
     }
 
@@ -2588,6 +2651,7 @@ public struct LocalChatScanner: @unchecked Sendable {
         let updatedAt: Date
         let tokenCount: Int?
         let status: String
+        let summaryComplete: Bool?
 
         func merging(source: SourceFile) -> Self {
             Self(
@@ -2603,7 +2667,8 @@ public struct LocalChatScanner: @unchecked Sendable {
                 startedAt: startedAt,
                 updatedAt: updatedAt,
                 tokenCount: tokenCount,
-                status: source.status == "Archived" ? "Archived" : status
+                status: source.status == "Archived" ? "Archived" : status,
+                summaryComplete: summaryComplete
             )
         }
     }

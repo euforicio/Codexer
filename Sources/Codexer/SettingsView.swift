@@ -523,7 +523,7 @@ private struct SettingsWindowConfigurator: NSViewRepresentable {
         guard let window else { return }
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = NSColor(calibratedWhite: 0.082, alpha: 1)
+        window.backgroundColor = .windowBackgroundColor
         window.minSize = NSSize(width: 780, height: 560)
         window.maxSize = NSSize(width: 880, height: 620)
     }

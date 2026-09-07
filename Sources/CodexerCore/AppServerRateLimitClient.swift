@@ -44,8 +44,11 @@ public final class AppServerRateLimitClient: @unchecked Sendable {
             return ProfileRateLimits(errorMessage: "Codex app-server executable was not found at \(codexExecutable.path).")
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = codexHomeURL.path
+        let environment = Self.launchEnvironment(
+            codexHomeURL: codexHomeURL,
+            codexExecutable: codexExecutable,
+            inherited: ProcessInfo.processInfo.environment
+        )
 
         let initializeCompletion = DispatchSemaphore(value: 0)
         let completion = DispatchSemaphore(value: 0)
@@ -120,6 +123,27 @@ public final class AppServerRateLimitClient: @unchecked Sendable {
         } catch {
             return ProfileRateLimits(errorMessage: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         }
+    }
+
+    static func launchEnvironment(
+        codexHomeURL: URL,
+        codexExecutable: URL,
+        inherited: [String: String]
+    ) -> [String: String] {
+        var environment = DesktopLaunchEnvironment.sanitized(inherited)
+        // Native account limits must use this home's login. Custom-provider
+        // credentials and endpoints are handled by CodexRateLimitClient instead.
+        for key in [
+            "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL",
+            "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID",
+            "CODEX_APP_SERVER_CHATGPT_BASE_URL", "CODEX_APP_SERVER_OPENAI_BASE_URL",
+            "CODEX_APP_SERVER_LOGIN_ISSUER", "CODEX_API_BASE_URL", "CODEX_API_ENDPOINT"
+        ] {
+            environment.removeValue(forKey: key)
+        }
+        environment["CODEX_HOME"] = codexHomeURL.path
+        environment["CODEX_CLI_PATH"] = codexExecutable.path
+        return environment
     }
 
     private func waitForCompletion(

@@ -8,13 +8,18 @@ final class CodexLauncherTests: XCTestCase {
         let inheritedEnvironment = [
             "CODEX_CLI_PATH": "/Applications/Cursor Bridge.app/Contents/MacOS/cursor-bridge",
             "CODEX_HOME": "/tmp/wrong-home",
+            "CODEX_ELECTRON_USER_DATA_PATH": "/tmp/wrong-desktop",
+            "CODEX_APP_SERVER_WS_URL": "ws://127.0.0.1:9999/another-profile",
+            "CLAUDE_USER_DATA_DIR": "/tmp/wrong-claude",
+            "HOME": "/tmp/shared-home",
             "PRESERVED_VALUE": "unchanged"
         ]
 
         let environment = SystemCodexWorkspaceLauncher.launchEnvironment(
             inheriting: inheritedEnvironment,
             codexAppURL: appURL,
-            codexHomePath: "/tmp/selected-home"
+            codexHomePath: "/tmp/selected-home",
+            electronUserDataPath: "/tmp/selected-desktop"
         )
 
         XCTAssertEqual(
@@ -22,6 +27,10 @@ final class CodexLauncherTests: XCTestCase {
             "/Applications/Codex.app/Contents/Resources/codex"
         )
         XCTAssertEqual(environment["CODEX_HOME"], "/tmp/selected-home")
+        XCTAssertEqual(environment["CODEX_ELECTRON_USER_DATA_PATH"], "/tmp/selected-desktop")
+        XCTAssertNil(environment["CODEX_APP_SERVER_WS_URL"])
+        XCTAssertNil(environment["CLAUDE_USER_DATA_DIR"])
+        XCTAssertEqual(environment["HOME"], "/tmp/shared-home")
         XCTAssertEqual(environment["PRESERVED_VALUE"], "unchanged")
     }
 
@@ -30,13 +39,16 @@ final class CodexLauncherTests: XCTestCase {
         let inheritedEnvironment = [
             "CODEX_CLI_PATH": "/Applications/Cursor Bridge.app/Contents/MacOS/cursor-bridge",
             "CODEX_HOME": "/tmp/wrong-home",
+            "CODEX_ELECTRON_USER_DATA_PATH": "/tmp/wrong-desktop",
+            "CODEX_APP_SERVER_WS_URL": "ws://127.0.0.1:9999/another-profile",
             "PRESERVED_VALUE": "unchanged"
         ]
 
         let environment = SystemCodexWorkspaceLauncher.launchEnvironment(
             inheriting: inheritedEnvironment,
             codexAppURL: appURL,
-            codexHomePath: nil
+            codexHomePath: nil,
+            electronUserDataPath: nil
         )
 
         XCTAssertEqual(
@@ -44,6 +56,8 @@ final class CodexLauncherTests: XCTestCase {
             "/Applications/Codex.app/Contents/Resources/codex"
         )
         XCTAssertNil(environment["CODEX_HOME"])
+        XCTAssertNil(environment["CODEX_ELECTRON_USER_DATA_PATH"])
+        XCTAssertNil(environment["CODEX_APP_SERVER_WS_URL"])
         XCTAssertEqual(environment["PRESERVED_VALUE"], "unchanged")
     }
 
@@ -124,6 +138,35 @@ final class CodexLauncherTests: XCTestCase {
             ),
             [101]
         )
+    }
+
+    func testDiscoveryRejectsConflictingProfileArgumentsAndBundlePrefixLookalikes() {
+        let selected = configuration(for: makeProfile(slug: "selected"))
+        let other = configuration(for: makeProfile(slug: "other"))
+        let executable = selected.appExecutableURL.path
+        let helper = selected.codexAppURL.appendingPathComponent("Contents/Frameworks/Helper").path
+        let lookalike = selected.codexAppURL.appendingPathComponent("Contents-other/Helper").path
+        let snapshot = """
+          101 \(executable) --user-data-dir=\(selected.electronUserDataPath) --user-data-dir=\(other.electronUserDataPath)
+          202 \(helper) --user-data-dir=\(selected.electronUserDataPath) --user-data-dir=\(other.electronUserDataPath)
+          303 \(lookalike) --user-data-dir=\(selected.electronUserDataPath)
+          404 \(helper) --user-data-dir=\(other.electronUserDataPath) --database=\(selected.electronUserDataPath)/Crashpad
+        """
+
+        for configuration in [selected, other] {
+            XCTAssertTrue(CodexInstanceDiscovery.processIDs(
+                in: snapshot,
+                configuration: configuration
+            ).isEmpty)
+        }
+        XCTAssertTrue(CodexInstanceDiscovery.profileProcessIDs(
+            in: snapshot,
+            configuration: selected
+        ).isEmpty)
+        XCTAssertTrue(CodexInstanceDiscovery.stockProcessIDs(
+            in: snapshot,
+            appExecutableURL: selected.appExecutableURL
+        ).isEmpty)
     }
 
     func testProfileProcessDiscoveryIncludesOnlyExecutablesOwnedBySelectedCodexHome() {

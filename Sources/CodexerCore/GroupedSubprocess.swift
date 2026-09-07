@@ -29,6 +29,16 @@ final class GroupedSubprocess {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
+        // A child can exit between a liveness check and a write. Report EPIPE
+        // to the caller instead of letting SIGPIPE terminate the application.
+        guard fcntl(inputPipe[1], F_SETNOSIGPIPE, 1) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            for descriptor in inputPipe + outputPipe {
+                close(descriptor)
+            }
+            throw error
+        }
+
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         posix_spawn_file_actions_init(&actions)

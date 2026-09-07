@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public final class CodexRateLimitClient: @unchecked Sendable {
@@ -80,9 +81,14 @@ enum CodexProviderConfiguration: Equatable, Sendable {
         configProfile: CodexConfigProfile? = nil
     ) throws -> Self {
         let configURL = codexHomeURL.appendingPathComponent("config.toml")
-        let content = fileManager.fileExists(atPath: configURL.path)
-            ? try readBoundedConfig(at: configURL)
-            : ""
+        var status = Darwin.stat()
+        let content: String
+        if Darwin.lstat(configURL.path, &status) == 0 {
+            content = try readBoundedConfig(at: configURL)
+        } else {
+            guard errno == ENOENT else { throw CodexProviderConfigurationError.unsafeConfig }
+            content = ""
+        }
         var document = NarrowTOMLDocument(content)
         if let configProfile {
             try configProfile.validate(in: codexHomeURL)
@@ -91,7 +97,7 @@ enum CodexProviderConfiguration: Equatable, Sendable {
             )))
         }
         guard !document.isEmpty else { return .openAI }
-        let providerID = document.topLevelString("model_provider") ?? "openai"
+        let providerID = try document.topLevelString("model_provider") ?? "openai"
         guard providerID != "openai" else { return .openAI }
         guard let baseURLString = document.string(
             "base_url",
@@ -167,10 +173,12 @@ struct CustomCodexProvider: Equatable, Sendable {
 private enum CodexProviderConfigurationError: Error {
     case unsafeConfig
     case invalidEncoding
+    case unsupportedProviderSelection
 }
 
 private struct NarrowTOMLDocument {
     private var values: [[String]: [String: String]] = [:]
+    private var duplicateTopLevelKeys: Set<String> = []
 
     var isEmpty: Bool { values.isEmpty }
 
@@ -185,29 +193,48 @@ private struct NarrowTOMLDocument {
                 }
                 continue
             }
-            if let delimiter = Self.startingMultilineDelimiter(in: line) {
+            let stripped = Self.stripComment(line).trimmingCharacters(in: .whitespaces)
+            if let (key, value) = Self.assignment(stripped),
+               let delimiter = Self.startingMultilineDelimiter(in: value)
+            {
+                // Preserve the selection's presence even when this narrow parser
+                // cannot decode its TOML representation. It must not select OpenAI.
+                if table.isEmpty, values[table]?[key] != nil {
+                    duplicateTopLevelKeys.insert(key)
+                }
+                values[table, default: [:]][key] = value
                 multilineDelimiter = delimiter
                 continue
             }
-            let stripped = Self.stripComment(line).trimmingCharacters(in: .whitespaces)
             guard !stripped.isEmpty else { continue }
             if let parsedTable = Self.tablePath(stripped) {
                 table = parsedTable
                 continue
             }
             guard let (key, value) = Self.assignment(stripped) else { continue }
+            if table.isEmpty, values[table]?[key] != nil {
+                duplicateTopLevelKeys.insert(key)
+            }
             values[table, default: [:]][key] = value
         }
     }
 
     mutating func overlay(_ other: Self) {
+        duplicateTopLevelKeys.formUnion(other.duplicateTopLevelKeys)
         for (table, entries) in other.values {
             values[table, default: [:]].merge(entries) { _, overlayValue in overlayValue }
         }
     }
 
-    func topLevelString(_ key: String) -> String? {
-        Self.stringValue(values[[]]?[key])
+    func topLevelString(_ key: String) throws -> String? {
+        guard !duplicateTopLevelKeys.contains(key) else {
+            throw CodexProviderConfigurationError.unsupportedProviderSelection
+        }
+        guard let raw = values[[]]?[key] else { return nil }
+        guard let value = Self.stringValue(raw), !value.isEmpty else {
+            throw CodexProviderConfigurationError.unsupportedProviderSelection
+        }
+        return value
     }
 
     func string(_ key: String, in table: [String]) -> String? {
@@ -248,7 +275,7 @@ private struct NarrowTOMLDocument {
             if character == "=", quote == nil {
                 let key = line[..<index].trimmingCharacters(in: .whitespaces)
                 let value = line[line.index(after: index)...].trimmingCharacters(in: .whitespaces)
-                guard !key.isEmpty, !value.isEmpty else { return nil }
+                guard !key.isEmpty else { return nil }
                 return (unquotedKey(String(key)), String(value))
             }
         }
@@ -256,8 +283,10 @@ private struct NarrowTOMLDocument {
     }
 
     private static func tablePath(_ line: String) -> [String]? {
-        guard line.first == "[", line.last == "]", !line.hasPrefix("[[") else { return nil }
-        let body = line.dropFirst().dropLast()
+        guard line.first == "[", line.last == "]" else { return nil }
+        let isArray = line.hasPrefix("[[")
+        guard !isArray || line.hasSuffix("]]") else { return nil }
+        let body = line.dropFirst(isArray ? 2 : 1).dropLast(isArray ? 2 : 1)
         var result: [String] = []
         var current = ""
         var quote: Character?

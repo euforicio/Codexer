@@ -81,11 +81,24 @@ public final class AdvisoryFileLock: @unchecked Sendable {
         )
         let fileDescriptor = Darwin.open(
             lockURL.path,
-            O_CREAT | O_RDWR | O_CLOEXEC,
+            O_CREAT | O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
             mode_t(S_IRUSR | S_IWUSR)
         )
         guard fileDescriptor >= 0 else {
             throw ProfileOperationLockError.couldNotOpen(errno)
+        }
+        var status = Darwin.stat()
+        guard Darwin.fstat(fileDescriptor, &status) == 0 else {
+            let code = errno
+            Darwin.close(fileDescriptor)
+            throw ProfileOperationLockError.couldNotOpen(code)
+        }
+        guard status.st_mode & S_IFMT == S_IFREG,
+              status.st_uid == geteuid(),
+              status.st_nlink == 1
+        else {
+            Darwin.close(fileDescriptor)
+            throw ProfileOperationLockError.couldNotOpen(EINVAL)
         }
         return fileDescriptor
     }
@@ -99,10 +112,13 @@ public final class ProfileOperationLock: @unchecked Sendable {
     }
 
     public static func lockFileURL(for profileDirectory: URL) -> URL {
-        profileDirectory
+        let canonicalDirectory = profileDirectory
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        return canonicalDirectory
             .deletingLastPathComponent()
             .appendingPathComponent(".codexer-locks", isDirectory: true)
-            .appendingPathComponent("\(profileDirectory.lastPathComponent).lock")
+            .appendingPathComponent("\(canonicalDirectory.lastPathComponent).lock")
     }
 
     public static func acquire(

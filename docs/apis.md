@@ -23,6 +23,7 @@ Codex profiles use:
 
 ```text
 CODEX_HOME=<profile>/CODEX_HOME
+CODEX_ELECTRON_USER_DATA_PATH=<profile>/ElectronUserData
 --user-data-dir=<profile>/ElectronUserData
 [generated] --config <dotted-key=toml-value> ... app-server
 ```
@@ -41,11 +42,14 @@ Claude profiles use:
 
 ```text
 CLAUDE_USER_DATA_DIR=<profile>/UserData
+--user-data-dir=<profile>/UserData
 ```
 
 Claude launches proceed only when the installed signed app still exposes the
-verified early environment-variable and `app.setPath` behavior. AgentDock does
-not use a generic Electron profile flag for Claude.
+verified early environment-variable and `app.setPath` behavior. The matching
+argument also pins Chromium session storage from process startup. The signed
+app and exact process/root attribution remain mandatory; the argument alone
+is not evidence of a supported isolation contract.
 
 ## Persistent Formats
 
@@ -54,7 +58,9 @@ not use a generic Electron profile flag for Claude.
 - Profile ownership markers: bind managed directories to persisted profiles.
 - Shortcut configuration plist: binds a generated shortcut to one provider,
   profile root, and ownership identity.
-- Chat indexes: versioned, bounded summary metadata with relative source paths.
+- Chat indexes: versioned, bounded summary metadata with relative source paths
+  and a source-root fingerprint. Readers reject a different source root or
+  duplicate cached paths. Unchanged indexes are not rewritten.
 - Analytics state: `undecided`, `denied`, or `granted` in UserDefaults. The
   analytics boundary never promotes `undecided` without a user action. A random
   installation UUID exists only while granted and is deleted on opt-out;
@@ -75,6 +81,9 @@ Codex usage resolution follows the active user-level provider configuration:
 - A selected non-OpenAI provider without a usable custom-provider definition
   reports usage as unavailable. It does not fall back to an unrelated OpenAI
   account limit.
+- A present but unsupported `model_provider` value, or an unsafe configuration
+  file, also reports usage as unavailable. Missing and malformed configuration
+  are not interchangeable.
 
 The quota response is a normalized meter document containing an optional plan
 and `meters`. Each meter may provide `id`, `label`, `used_percent`,

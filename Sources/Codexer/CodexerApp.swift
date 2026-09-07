@@ -34,10 +34,15 @@ struct CodexerApp: App {
             }
 
             CommandGroup(after: .textEditing) {
-                Button("Search Profiles") {
+                Button("Find…") {
                     NotificationCenter.default.post(name: .agentDockFocusSearch, object: nil)
                 }
                 .keyboardShortcut("f", modifiers: .command)
+
+                Button("Search Profiles") {
+                    NotificationCenter.default.post(name: .agentDockFocusProfileSearch, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
             }
         }
 

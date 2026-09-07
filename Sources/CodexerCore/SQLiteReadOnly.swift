@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 enum SQLiteReadOnly {
-    static func databaseArgument(for database: URL) throws -> String {
+    static func databaseArgument(for database: URL, under root: URL? = nil) throws -> String {
         // `sqlite3 -nofollow` rejects symlinked path components on macOS. Resolve
         // only the parent, retain the final name, then validate the final files.
         let originalParent = database.deletingLastPathComponent()
@@ -12,6 +12,19 @@ enum SQLiteReadOnly {
         defer { Darwin.free(resolvedParent) }
         let parent = URL(fileURLWithPath: String(cString: resolvedParent), isDirectory: true)
         let canonicalDatabase = parent.appendingPathComponent(database.lastPathComponent)
+        if let root {
+            let rootPath = root.standardizedFileURL.path + "/"
+            let databasePath = database.standardizedFileURL.path
+            guard databasePath.hasPrefix(rootPath),
+                  let resolvedRoot = Darwin.realpath(root.path, nil)
+            else { throw SQLiteReadOnlyError.unsafeDatabase(database.path) }
+            defer { Darwin.free(resolvedRoot) }
+            let expected = URL(fileURLWithPath: String(cString: resolvedRoot), isDirectory: true)
+                .appendingPathComponent(String(databasePath.dropFirst(rootPath.count)))
+            guard expected.path == canonicalDatabase.path else {
+                throw SQLiteReadOnlyError.unsafeDatabase(database.path)
+            }
+        }
         let wal = URL(fileURLWithPath: canonicalDatabase.path + "-wal")
         let sharedMemory = URL(fileURLWithPath: canonicalDatabase.path + "-shm")
         _ = try validateRegularFile(canonicalDatabase, required: true)

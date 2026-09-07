@@ -10,7 +10,9 @@ surface and no application server of its own.
 [Sources/Codexer](../Sources/Codexer) contains the SwiftUI application, navigation, profile
 management, activity views, chat list, and transcript host. `CodexerModel` owns
 UI-facing asynchronous state and suppresses stale refresh results when profiles
-or conversations change. See
+or conversations change. Every sidebar selection change immediately cancels
+pending chat work and clears the previous profile's list, transcript, and paging
+cursor. An invalid selection never resolves to a different profile. See
 [CodexerModel.swift](../Sources/Codexer/CodexerModel.swift) and
 [ChatsView.swift](../Sources/Codexer/ChatsView.swift).
 
@@ -97,8 +99,10 @@ managed data are not migrated or replaced.
 ## Isolation Model
 
 Managed Codex profiles receive separate `CODEX_HOME` and Electron user-data
-directories. Managed Claude profiles receive separate `UserData` roots through
-the verified `CLAUDE_USER_DATA_DIR` launch contract.
+directories, pinned through both the supported Electron environment variable
+and its matching command-line argument. Managed Claude profiles receive
+separate `UserData` roots through the verified `CLAUDE_USER_DATA_DIR` launch
+contract and the matching Chromium `--user-data-dir` argument.
 
 Codex launch-profile selection and its default are account-local metadata for
 every managed profile and the official account. `Use Default`, explicit

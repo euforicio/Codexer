@@ -49,6 +49,26 @@ final class SQLiteReadOnlyTests: XCTestCase {
         XCTAssertThrowsError(try SQLiteReadOnly.databaseArgument(for: database))
     }
 
+    func testScopedDatabaseRejectsSymlinkedParentFromAnotherProfile() throws {
+        let profile = root.appendingPathComponent("Profile", isDirectory: true)
+        let otherProfile = root.appendingPathComponent("OtherProfile", isDirectory: true)
+        try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: otherProfile, withIntermediateDirectories: true)
+        let database = otherProfile.appendingPathComponent("Cookies")
+        try Data("synthetic sqlite bytes".utf8).write(to: database)
+        let network = profile.appendingPathComponent("Network", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: network, withDestinationURL: otherProfile)
+
+        XCTAssertThrowsError(try SQLiteReadOnly.databaseArgument(
+            for: network.appendingPathComponent("Cookies"),
+            under: profile
+        ))
+        XCTAssertEqual(
+            try SQLiteReadOnly.databaseArgument(for: database, under: otherProfile),
+            canonical(database).absoluteString + "?immutable=1"
+        )
+    }
+
     private func canonical(_ database: URL) -> URL {
         let parent = database.deletingLastPathComponent()
         let resolved = realpath(parent.path, nil)!

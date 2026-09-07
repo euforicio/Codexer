@@ -91,6 +91,74 @@ final class CodexRateLimitClientTests: XCTestCase {
         XCTAssertEqual(provider.baseURL.absoluteString, "http://127.0.0.1:11434/v1")
     }
 
+    func testNamedConfigProfileSelectsProviderWithoutBaseConfiguration() throws {
+        try Data("model_provider = \"custom\"\n".utf8)
+            .write(to: root.appendingPathComponent("custom.config.toml"))
+        let profile = try XCTUnwrap(CodexConfigProfile(validating: "custom"))
+        XCTAssertEqual(
+            try CodexProviderConfiguration.resolve(codexHomeURL: root, configProfile: profile),
+            .unsupported("custom")
+        )
+    }
+
+    func testDuplicateSelectionInNamedConfigProfileFailsClosed() throws {
+        try Data("model_provider = \"custom\"\nmodel_provider = \"openai\"\n".utf8)
+            .write(to: root.appendingPathComponent("custom.config.toml"))
+        let profile = try XCTUnwrap(CodexConfigProfile(validating: "custom"))
+        XCTAssertThrowsError(
+            try CodexProviderConfiguration.resolve(codexHomeURL: root, configProfile: profile)
+        )
+    }
+
+    func testBrokenConfigurationSymlinkDoesNotUseOpenAIQuota() throws {
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("config.toml"),
+            withDestinationURL: root.appendingPathComponent("missing.toml")
+        )
+
+        XCTAssertThrowsError(try CodexProviderConfiguration.resolve(codexHomeURL: root))
+    }
+
+    func testUnsupportedProviderSelectionDoesNotUseOpenAIQuota() throws {
+        for selection in ["", "# Empty selection", "123", "\"\"", "\"\"\"custom\"\"\"", "\"\"\"\ncustom\n\"\"\""] {
+            try Data("model_provider = \(selection)\n".utf8)
+                .write(to: root.appendingPathComponent("config.toml"))
+
+            XCTAssertThrowsError(
+                try CodexProviderConfiguration.resolve(codexHomeURL: root),
+                "Unsupported selection must fail closed: \(selection)"
+            )
+        }
+    }
+
+    func testDuplicateProviderSelectionFailsClosedInEitherOrder() throws {
+        for selections in [["custom", "openai"], ["openai", "custom"], ["openai", "openai"]] {
+            let content = selections.map { "model_provider = \"\($0)\"" }.joined(separator: "\n")
+            try Data(content.utf8).write(to: root.appendingPathComponent("config.toml"))
+            XCTAssertThrowsError(try CodexProviderConfiguration.resolve(codexHomeURL: root))
+        }
+    }
+
+    func testMultilineDelimitersInCommentsDoNotHideCustomProviderSelection() throws {
+        try Data("# Documentation uses \"\"\" for multiline strings\nmodel_provider = \"custom\"\n".utf8)
+            .write(to: root.appendingPathComponent("config.toml"))
+
+        XCTAssertEqual(
+            try CodexProviderConfiguration.resolve(codexHomeURL: root),
+            .unsupported("custom")
+        )
+    }
+
+    func testArrayTableCannotOverrideTopLevelProviderSelection() throws {
+        try Data("model_provider = \"custom\"\n[[tools]]\nmodel_provider = \"openai\"\n".utf8)
+            .write(to: root.appendingPathComponent("config.toml"))
+
+        XCTAssertEqual(
+            try CodexProviderConfiguration.resolve(codexHomeURL: root),
+            .unsupported("custom")
+        )
+    }
+
     func testCustomProviderUsageAllowsHTTPSAndLoopbackHTTPOnly() throws {
         XCTAssertNotNil(CustomProviderEndpoint.usageURL(provider("https://provider.example/v1")))
         XCTAssertNotNil(CustomProviderEndpoint.usageURL(provider("http://localhost:8080/v1")))

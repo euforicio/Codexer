@@ -23,6 +23,11 @@ struct AddProfileSheet: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Add Profile")
                         .font(.system(size: 19, weight: .semibold))
+                        .padding(.bottom, 6)
+                    Text("Create a profile, open the provider app, then sign in with the account you want to use.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.bottom, 18)
 
                     VStack(alignment: .leading, spacing: 14) {
@@ -51,6 +56,7 @@ struct AddProfileSheet: View {
                                 .focused($nameFocused)
                                 .onSubmit(submit)
                                 .disabled(isSubmitting)
+                                .accessibilityLabel("Profile name")
                         }
                     }
                     .padding(.bottom, 16)
@@ -89,7 +95,7 @@ struct AddProfileSheet: View {
                     }
                     .padding(.horizontal, 12)
                     .frame(minHeight: 46)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                    .background(AgentDockPalette.panel, in: RoundedRectangle(cornerRadius: 8))
                     .disabled(isSubmitting)
                     .padding(.bottom, 14)
 
@@ -110,8 +116,7 @@ struct AddProfileSheet: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .scrollIndicators(customizeExpanded ? .visible : .hidden)
-            .scrollDisabled(!customizeExpanded)
+            .scrollIndicators(.automatic)
 
             HStack(spacing: 12) {
                 Spacer()
@@ -138,13 +143,14 @@ struct AddProfileSheet: View {
         .padding(24)
         .frame(
             width: 480,
-            height: customizeExpanded ? 540 : 356,
+            height: customizeExpanded ? 590 : 420,
             alignment: .topLeading
         )
         .background(AgentDockPalette.graphite)
-        .background(AddProfileWindowConfigurator(isExpanded: customizeExpanded))
+        .background(AddProfileWindowConfigurator(isExpanded: customizeExpanded, reduceMotion: reduceMotion))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: customizeExpanded)
-        .onAppear {
+        .task {
+            product = model.selectedProfile?.product ?? model.selectedOfficialProduct ?? .codex
             nameFocused = true
         }
         .onDisappear {
@@ -195,6 +201,7 @@ struct AddProfileSheet: View {
 
 private struct AddProfileWindowConfigurator: NSViewRepresentable {
     let isExpanded: Bool
+    let reduceMotion: Bool
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -208,7 +215,7 @@ private struct AddProfileWindowConfigurator: NSViewRepresentable {
 
     private func resize(_ window: NSWindow?) {
         guard let window else { return }
-        let target = NSSize(width: 480, height: isExpanded ? 540 : 356)
+        let target = NSSize(width: 480, height: isExpanded ? 590 : 420)
         guard abs(window.contentLayoutRect.width - target.width) > 0.5
             || abs(window.contentLayoutRect.height - target.height) > 0.5
         else {
@@ -220,6 +227,6 @@ private struct AddProfileWindowConfigurator: NSViewRepresentable {
         var frame = window.frame
         frame.origin.x = center.x - frame.width / 2
         frame.origin.y = center.y - frame.height / 2
-        window.setFrame(frame, display: true, animate: true)
+        window.setFrame(frame, display: true, animate: !reduceMotion)
     }
 }

@@ -77,8 +77,17 @@ struct EditProfileSheet: View {
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+
+                if let errorMessage = model.errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 12)
+                }
             }
             .scrollIndicators(.visible)
+            .disabled(model.storeMutationInProgress)
 
             Divider()
                 .overlay(AgentDockPalette.divider)
@@ -89,6 +98,7 @@ struct EditProfileSheet: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancel", role: .cancel) {
+                    model.errorMessage = nil
                     dismiss()
                 }
                 .controlSize(.regular)
@@ -139,6 +149,7 @@ struct ProfileAppearanceEditor: View {
     @Binding var customIconData: Data?
     let existingImageURL: URL?
     let compact: Bool
+    @State private var imageSelectionError: String?
 
     private let monograms = ["P", "W", "Y", "C", "D"]
     private let symbols = [
@@ -174,6 +185,12 @@ struct ProfileAppearanceEditor: View {
                 }
             case .image:
                 imagePicker
+                if let imageSelectionError {
+                    Label(imageSelectionError, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             VStack(alignment: .leading, spacing: 7) {
@@ -230,7 +247,7 @@ struct ProfileAppearanceEditor: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: compact ? 34 : 38)
                         .background(
-                            Color.white.opacity(0.055),
+                            AgentDockPalette.panel,
                             in: .rect(cornerRadius: 7)
                         )
                         .overlay {
@@ -238,7 +255,7 @@ struct ProfileAppearanceEditor: View {
                                 .stroke(
                                     isSelected(value, kind: kind)
                                         ? Color.accentColor
-                                        : Color.white.opacity(0.08),
+                                        : AgentDockPalette.panelBorder,
                                     lineWidth: isSelected(value, kind: kind) ? 2 : 1
                                 )
                         }
@@ -297,9 +314,10 @@ struct ProfileAppearanceEditor: View {
             let image = NSImage(data: data),
             image.isValid
         else {
-            NSSound.beep()
+            imageSelectionError = "Choose a valid PNG, JPEG, or HEIC image no larger than 10 MB."
             return
         }
+        imageSelectionError = nil
         customIconData = data
         iconKind = .image
     }

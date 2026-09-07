@@ -65,21 +65,27 @@ public enum ClaudeInstanceDiscovery {
         userDataURL: URL
     ) -> [Int32] {
         let canonicalUserDataPath = canonical(userDataURL)
+        return userDataPathsByMainProcess(in: snapshot, appURL: appURL)
+            .compactMap { processID, paths in
+                paths == [canonicalUserDataPath] ? processID : nil
+            }.sorted()
+    }
+
+    static func userDataPathsByMainProcess(
+        in snapshot: ClaudeProcessSnapshot,
+        appURL: URL
+    ) -> [Int32: Set<String>] {
         let contentsPrefix = appURL.standardizedFileURL
             .appendingPathComponent("Contents", isDirectory: true)
-            .path
+            .path + "/"
         let mainExecutable = DesktopAppRegistry.claude
             .executableURL(for: appURL)
             .standardizedFileURL
             .path
 
-        var result = Set<Int32>()
+        var pathsByMainProcess: [Int32: Set<String>] = [:]
         for entry in snapshot.entries.values {
             guard entry.command.hasPrefix(contentsPrefix),
-                  userDataArguments(in: entry.command).contains(where: {
-                      canonical(URL(fileURLWithPath: $0, isDirectory: true))
-                          == canonicalUserDataPath
-                  }),
                   let mainProcessID = mainAncestor(
                       from: entry.processID,
                       snapshot: snapshot,
@@ -88,30 +94,14 @@ public enum ClaudeInstanceDiscovery {
             else {
                 continue
             }
-            result.insert(mainProcessID)
-        }
-        return result.sorted()
-    }
-
-    private static func userDataArguments(in command: String) -> [String] {
-        let marker = "--user-data-dir="
-        var values: [String] = []
-        var searchStart = command.startIndex
-        while let markerRange = command.range(
-            of: marker,
-            range: searchStart..<command.endIndex
-        ) {
-            let valueStart = markerRange.upperBound
-            let remaining = command[valueStart...]
-            let valueEnd = remaining.range(of: " --")?.lowerBound ?? command.endIndex
-            let value = command[valueStart..<valueEnd]
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            if !value.isEmpty {
-                values.append(value)
+            let paths = CodexInstanceDiscovery.userDataArguments(in: entry.command)
+            for path in paths {
+                pathsByMainProcess[mainProcessID, default: []].insert(
+                    path.isEmpty ? "" : canonical(URL(fileURLWithPath: path, isDirectory: true))
+                )
             }
-            searchStart = valueEnd
         }
-        return values
+        return pathsByMainProcess
     }
 
     private static func mainAncestor(
@@ -161,6 +151,27 @@ public actor ClaudeInstanceController {
     private let snapshotProvider: SystemClaudeProcessSnapshotProvider
     private let processTreeProvider: SystemProcessTreeSnapshotProvider
     private let processSignaler: SystemProcessIdentitySignaler
+
+    static func launchEnvironment(
+        inheriting inheritedEnvironment: [String: String],
+        userDataPath: String?
+    ) -> [String: String] {
+        var environment = DesktopLaunchEnvironment.sanitized(inheritedEnvironment)
+        environment["CLAUDE_USER_DATA_DIR"] = userDataPath
+        return environment
+    }
+
+    static func validateLaunchedProcessID(
+        _ processID: Int32,
+        existingProcessIDs: Set<Int32>
+    ) throws {
+        guard processID > 0 else {
+            throw ClaudeLauncherError.launchDidNotReturnProcess
+        }
+        guard !existingProcessIDs.contains(processID) else {
+            throw ClaudeLauncherError.launchReturnedExistingProcess(processID)
+        }
+    }
 
     public init(
         validator: OfficialDesktopAppValidator = OfficialDesktopAppValidator(),
@@ -246,27 +257,29 @@ public actor ClaudeInstanceController {
         configuration.addsToRecentItems = false
         configuration.allowsRunningApplicationSubstitution = false
         configuration.createsNewApplicationInstance = true
-        var environment = ProcessInfo.processInfo.environment
-        environment["CLAUDE_USER_DATA_DIR"] = profile.claudeUserDataPath.path
-        configuration.environment = environment
+        // Pin Chromium storage from process startup as well as the app's
+        // JavaScript userData override.
+        configuration.arguments = ["--user-data-dir=\(profile.claudeUserDataPath.path)"]
+        configuration.environment = Self.launchEnvironment(
+            inheriting: ProcessInfo.processInfo.environment,
+            userDataPath: profile.claudeUserDataPath.path
+        )
 
+        let existingProcessIDs = Set(NSRunningApplication.runningApplications(
+            withBundleIdentifier: DesktopAppRegistry.claude.bundleIdentifier
+        ).map(\.processIdentifier))
         let application = try await NSWorkspace.shared.openApplication(
             at: appURL,
             configuration: configuration
         )
         let processID = application.processIdentifier
-        guard processID > 0 else {
-            throw ClaudeLauncherError.launchDidNotReturnProcess
-        }
-        do {
-            try await waitForLaunch(
-                expectedProcessID: processID,
-                status: { try self.status(for: profile, appURL: appURL) }
-            )
-        } catch {
-            application.terminate()
-            throw error
-        }
+        try Self.validateLaunchedProcessID(processID, existingProcessIDs: existingProcessIDs)
+        // A launch response does not establish profile ownership. Leave an
+        // unverified process running instead of risking another active profile.
+        try await waitForLaunch(
+            expectedProcessID: processID,
+            status: { try self.status(for: profile, appURL: appURL) }
+        )
         return .launched(processID: processID)
     }
 
@@ -284,27 +297,24 @@ public actor ClaudeInstanceController {
         configuration.addsToRecentItems = false
         configuration.allowsRunningApplicationSubstitution = false
         configuration.createsNewApplicationInstance = true
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "CLAUDE_USER_DATA_DIR")
-        configuration.environment = environment
+        configuration.environment = Self.launchEnvironment(
+            inheriting: ProcessInfo.processInfo.environment,
+            userDataPath: nil
+        )
 
+        let existingProcessIDs = Set(NSRunningApplication.runningApplications(
+            withBundleIdentifier: DesktopAppRegistry.claude.bundleIdentifier
+        ).map(\.processIdentifier))
         let application = try await NSWorkspace.shared.openApplication(
             at: appURL,
             configuration: configuration
         )
         let processID = application.processIdentifier
-        guard processID > 0 else {
-            throw ClaudeLauncherError.launchDidNotReturnProcess
-        }
-        do {
-            try await waitForLaunch(
-                expectedProcessID: processID,
-                status: { try self.stockStatus(appURL: appURL) }
-            )
-        } catch {
-            application.terminate()
-            throw error
-        }
+        try Self.validateLaunchedProcessID(processID, existingProcessIDs: existingProcessIDs)
+        try await waitForLaunch(
+            expectedProcessID: processID,
+            status: { try self.stockStatus(appURL: appURL) }
+        )
         return .launched(processID: processID)
     }
 
@@ -459,6 +469,7 @@ public enum ClaudeLauncherError: Error, LocalizedError, Equatable {
     case processInspectionUnavailable
     case invalidIsolationLayout(String)
     case launchDidNotReturnProcess
+    case launchReturnedExistingProcess(Int32)
     case launchedProcessFailedValidation(Int32)
     case couldNotFocus(Int32)
     case couldNotTerminate(Int32)
@@ -474,6 +485,8 @@ public enum ClaudeLauncherError: Error, LocalizedError, Equatable {
             "The managed Claude profile at \(path) is missing its verified UserData layout."
         case .launchDidNotReturnProcess:
             "Claude Desktop launched without returning a process identifier."
+        case .launchReturnedExistingProcess:
+            "Claude Desktop returned an existing application instance. It was left running to protect its active profile."
         case let .launchedProcessFailedValidation(processID):
             "Claude Desktop process \(processID) did not adopt the selected managed profile."
         case let .couldNotFocus(processID):

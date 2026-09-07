@@ -26,7 +26,22 @@ enum AgentDockDetailTab: String, CaseIterable, Identifiable {
 @MainActor
 final class CodexerModel: ObservableObject {
     @Published private(set) var profiles: [CodexProfile] = []
-    @Published var sidebarSelection: CodexerSidebarSelection?
+    @Published var sidebarSelection: CodexerSidebarSelection? {
+        didSet {
+            guard sidebarSelection != oldValue else { return }
+            cancelChatWork()
+            loadedChatSelection = nil
+            selectedChatID = nil
+            chatSessions = []
+            chatAvailability = .available
+            chatTranscriptEntries = []
+            chatTranscriptCursor = nil
+            chatTranscriptSourceChanged = false
+            chatsLoading = false
+            chatTranscriptLoading = false
+            chatOlderTranscriptLoading = false
+        }
+    }
     @Published private(set) var appURLs: [DesktopProduct: URL]
     @Published var errorMessage: String?
     @Published var showAddProfile = false
@@ -92,20 +107,22 @@ final class CodexerModel: ObservableObject {
     private var loadedChatSelection: CodexerSidebarSelection?
     private var appliedInitialDefaultView = false
     private let officialCodexHomeURL: URL
-    private let officialClaudeUserDataURL = FileManager.default.urls(
-        for: .applicationSupportDirectory,
-        in: .userDomainMask
-    )[0].appendingPathComponent("Claude", isDirectory: true)
-    private let officialClaudeCodeHomeURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude", isDirectory: true)
+    private let officialClaudeUserDataURL: URL
+    private let officialClaudeCodeHomeURL: URL
 
     init() {
+        officialCodexHomeURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+        officialClaudeUserDataURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("Claude", isDirectory: true)
+        officialClaudeCodeHomeURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true)
         let preferencesStore = AgentDockPreferencesStore()
         self.preferencesStore = preferencesStore
         preferences = preferencesStore.load()
         officialCodexProfileSettings = preferencesStore.loadOfficialCodexProfileSettings()
-        officialCodexHomeURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
         chatScanner = LocalChatScanner()
         instanceController = DesktopInstanceController()
         shortcutInstaller = ShortcutInstaller()
@@ -188,6 +205,7 @@ final class CodexerModel: ObservableObject {
 
     init(
         store: ProfileStore,
+        officialDataRootURL: URL,
         codexAppURL: URL,
         claudeAppURL: URL = DesktopAppRegistry.claude.defaultAppURL,
         instanceController: any DesktopInstanceManaging = DesktopInstanceController(),
@@ -196,16 +214,19 @@ final class CodexerModel: ObservableObject {
         rateLimitClient: any ProfileRateLimitFetching = CodexRateLimitClient(),
         claudeUsageClient: any ClaudeUsageFetching = ClaudeUsageClient(),
         preferencesStore: AgentDockPreferencesStore = AgentDockPreferencesStore(),
-        chatScanner: LocalChatScanner = LocalChatScanner(),
-        officialCodexHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true),
-        startMonitoring: Bool = false
+        chatScanner: LocalChatScanner? = nil,
+        startMonitoring: Bool = false,
+        loadActivityOnInit: Bool = true
     ) {
+        officialCodexHomeURL = officialDataRootURL.appendingPathComponent(".codex", isDirectory: true)
+        officialClaudeUserDataURL = officialDataRootURL.appendingPathComponent("Claude", isDirectory: true)
+        officialClaudeCodeHomeURL = officialDataRootURL.appendingPathComponent(".claude", isDirectory: true)
         self.preferencesStore = preferencesStore
         preferences = preferencesStore.load()
         officialCodexProfileSettings = preferencesStore.loadOfficialCodexProfileSettings()
-        self.officialCodexHomeURL = officialCodexHomeURL
-        self.chatScanner = chatScanner
+        self.chatScanner = chatScanner ?? LocalChatScanner(
+            indexRootURL: officialDataRootURL.appendingPathComponent("ChatIndexes", isDirectory: true)
+        )
         self.store = store
         appURLs = [.codex: codexAppURL, .claude: claudeAppURL]
         self.instanceController = instanceController
@@ -214,7 +235,7 @@ final class CodexerModel: ObservableObject {
         self.rateLimitClient = rateLimitClient
         self.claudeUsageClient = claudeUsageClient
         allowsAutomaticRefresh = startMonitoring
-        reload()
+        reload(refreshData: loadActivityOnInit)
         if startMonitoring {
             startInstanceMonitoring()
         }
@@ -254,8 +275,8 @@ final class CodexerModel: ObservableObject {
     }
 
     var selectedProfile: CodexProfile? {
-        guard selectedOfficialProduct == nil else { return nil }
-        return profiles.first { $0.id == selectedProfileID } ?? profiles.first
+        guard let selectedProfileID else { return nil }
+        return profiles.first { $0.id == selectedProfileID }
     }
 
     var selectedProfileID: CodexProfile.ID? {
@@ -463,6 +484,9 @@ final class CodexerModel: ObservableObject {
         statsGeneration += 1
         let generation = statsGeneration
         let scanner = statsScanner
+        let officialCodexHomeURL = officialCodexHomeURL
+        let officialClaudeUserDataURL = officialClaudeUserDataURL
+        let officialClaudeCodeHomeURL = officialClaudeCodeHomeURL
         statsLoadingProfileIDs.removeAll()
         officialStatsLoading = false
         if replaceAll {
@@ -477,25 +501,16 @@ final class CodexerModel: ObservableObject {
                 var collected: [CodexProfile.ID: ProfileStats] = [:]
                 let official = replaceAll
                     ? scanner.stats(
-                        codexHomeURL: FileManager.default.homeDirectoryForCurrentUser
-                            .appendingPathComponent(".codex", isDirectory: true),
-                        dataRootURL: FileManager.default.homeDirectoryForCurrentUser
-                            .appendingPathComponent(".codex", isDirectory: true),
+                        codexHomeURL: officialCodexHomeURL,
+                        dataRootURL: officialCodexHomeURL,
                         now: Date()
                     )
                     : nil
                 let officialClaude = replaceAll
                     ? scanner.stats(
-                        claudeUserDataURL: FileManager.default.urls(
-                            for: .applicationSupportDirectory,
-                            in: .userDomainMask
-                        )[0].appendingPathComponent("Claude", isDirectory: true),
-                        claudeCodeHomeURL: FileManager.default.homeDirectoryForCurrentUser
-                            .appendingPathComponent(".claude", isDirectory: true),
-                        dataRootURL: FileManager.default.urls(
-                            for: .applicationSupportDirectory,
-                            in: .userDomainMask
-                        )[0].appendingPathComponent("Claude", isDirectory: true),
+                        claudeUserDataURL: officialClaudeUserDataURL,
+                        claudeCodeHomeURL: officialClaudeCodeHomeURL,
+                        dataRootURL: officialClaudeUserDataURL,
                         now: Date()
                     )
                     : nil
@@ -549,6 +564,8 @@ final class CodexerModel: ObservableObject {
         let officialConfigProfile = effectiveOfficialCodexConfigProfile
 
         rateLimitRefreshTask = Task { [weak self] in
+            // A provider may fulfill the async protocol with blocking I/O.
+            // Keep it off the main actor while still propagating cancellation.
             let officialWorker = Task.detached(priority: .utility) {
                 replaceAll
                     ? await client.fetchRateLimits(
@@ -558,7 +575,7 @@ final class CodexerModel: ObservableObject {
                     )
                     : nil
             }
-            let officialClaudeWorker = Task {
+            let officialClaudeWorker = Task.detached(priority: .utility) {
                 replaceAll
                     ? await claudeClient.fetchOfficialUsage(
                         claudeCodeHomeURL: officialClaudeCodeHomeURL,
@@ -567,6 +584,16 @@ final class CodexerModel: ObservableObject {
                         forceRefresh: allowCredentialInteraction
                     )
                     : nil
+            }
+            async let officialResult = withTaskCancellationHandler {
+                await officialWorker.value
+            } onCancel: {
+                officialWorker.cancel()
+            }
+            async let officialClaudeResult = withTaskCancellationHandler {
+                await officialClaudeWorker.value
+            } onCancel: {
+                officialClaudeWorker.cancel()
             }
             let results = await withTaskGroup(
                 of: (CodexProfile.ID, ProfileRateLimits).self,
@@ -616,8 +643,7 @@ final class CodexerModel: ObservableObject {
                 }
                 return collected
             }
-            let official = await officialWorker.value
-            let officialClaude = await officialClaudeWorker.value
+            let (official, officialClaude) = await (officialResult, officialClaudeResult)
 
             guard !Task.isCancelled, let self, self.rateLimitGeneration == generation else { return }
             if replaceAll {
@@ -1333,7 +1359,10 @@ final class CodexerModel: ObservableObject {
     }
 
     func selectChat(_ id: LocalChatSession.ID) {
-        guard id != selectedChatID else { return }
+        guard loadedChatSelection == sidebarSelection,
+              chatSessions.contains(where: { $0.id == id }),
+              id != selectedChatID
+        else { return }
         selectedChatID = id
         ProductAnalytics.shared.capture(AnalyticsEvent(
             .chatUsage,

@@ -186,6 +186,11 @@ public actor ClaudeUsageClient: ClaudeUsageFetching {
             limits.fetchedAt = Date()
             cache[key] = CachedUsage(limits: limits, retryAfter: nil)
             return limits
+        } catch ClaudeUsageClientError.identityMismatch {
+            cache.removeValue(forKey: key)
+            return ProfileRateLimits(
+                errorMessage: "The Claude login no longer matches this account. Open Claude and sign in, then refresh."
+            )
         } catch ClaudeUsageClientError.rateLimited(let retryAfter) {
             let retryAt = Date().addingTimeInterval(
                 ClaudeUsageRefreshPolicy.rateLimitCooldown(retryAfter: retryAfter)
@@ -317,6 +322,17 @@ public actor ClaudeUsageClient: ClaudeUsageFetching {
 struct ClaudeAccountIdentity: Equatable, Sendable {
     var accountUUID: String
     var organizationUUID: String
+
+    static func desktop(accountUUID: String?, organizationUUID: String) -> Self? {
+        guard let accountUUID,
+              let account = UUID(uuidString: accountUUID),
+              let organization = UUID(uuidString: organizationUUID)
+        else { return nil }
+        return Self(
+            accountUUID: account.uuidString.lowercased(),
+            organizationUUID: organization.uuidString.lowercased()
+        )
+    }
 }
 
 struct ClaudeUsageCredential: Sendable {
@@ -505,10 +521,10 @@ private struct ClaudeCredentialReader {
             ?? (organizations.count == 1 ? organizations.first : nil)
         else { return nil }
 
-        let expectedAccount = (root["lastKnownAccountUuid"] as? String)?.lowercased()
-        let identity = expectedAccount.map {
-            ClaudeAccountIdentity(accountUUID: $0, organizationUUID: activeOrganization)
-        }
+        guard let identity = ClaudeAccountIdentity.desktop(
+            accountUUID: root["lastKnownAccountUuid"] as? String,
+            organizationUUID: activeOrganization
+        ) else { return nil }
         for cache in caches {
             guard let credential = selectDesktopCredential(
                 cache,
@@ -627,9 +643,13 @@ private struct ClaudeCredentialReader {
         ORDER BY last_update_utc DESC LIMIT 1;
         """
         for cookieURL in cookieURLs where FileManager.default.fileExists(atPath: cookieURL.path) {
-            guard let result = try? BoundedSubprocess.run(
+            guard let databaseArgument = try? SQLiteReadOnly.databaseArgument(
+                for: cookieURL,
+                under: userDataURL
+            ),
+                  let result = try? BoundedSubprocess.run(
                 executableURL: URL(fileURLWithPath: "/usr/bin/sqlite3"),
-                arguments: ["-readonly", cookieURL.path, query],
+                arguments: ["-nofollow", "-readonly", databaseArgument, query],
                 timeout: 2,
                 maximumOutputBytes: 4_096
             ), result.terminationStatus == 0, !result.exceededOutputLimit,

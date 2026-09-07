@@ -755,6 +755,7 @@ public final class ProfileStore: @unchecked Sendable {
     private func validatePersistedProfilesAndMigrateOwnership() throws {
         var ids = Set<UUID>()
         var directories = Set<String>()
+        var shortcuts = Set<String>()
         var configuredPortsByDirectory = try configuredCallbackPortsByDirectory()
         var portUseCounts = configuredPortsByDirectory.values.reduce(into: [Int: Int]()) {
             $0[$1, default: 0] += 1
@@ -773,16 +774,21 @@ public final class ProfileStore: @unchecked Sendable {
             guard directories.insert(canonical(profile.profileDirectory).path).inserted else {
                 throw ProfileStoreError.overlappingProfileDirectory(profile.profileDirectory.path)
             }
-            let expectedShortcutDirectory = shortcutDirectory(for: profile.product)
+            let expectedShortcutDirectory = canonical(shortcutDirectory(for: profile.product))
+            let shortcutPath = canonical(profile.shortcutPath)
             guard canonical(profile.shortcutDirectory).path
-                    == canonical(expectedShortcutDirectory).path
+                    == expectedShortcutDirectory.path
             else {
                 throw ProfileStoreError.invalidShortcutDirectory(profile.shortcutDirectory.path)
             }
             guard profile.shortcutFileName == URL(fileURLWithPath: profile.shortcutFileName).lastPathComponent,
                   !profile.shortcutFileName.isEmpty,
-                  canonical(profile.shortcutPath).deletingLastPathComponent().path
-                    == canonical(expectedShortcutDirectory).path
+                  profile.shortcutPath.pathExtension.lowercased() == "app",
+                  slugify(profile.shortcutPath.deletingPathExtension().lastPathComponent)
+                    == slugify(profile.slug),
+                  shortcutPath.deletingLastPathComponent().path
+                    == expectedShortcutDirectory.path,
+                  shortcuts.insert(shortcutPath.path).inserted
             else {
                 throw ProfileStoreError.invalidShortcutDirectory(profile.shortcutPath.path)
             }
@@ -958,7 +964,11 @@ public final class ProfileStore: @unchecked Sendable {
     ) throws {
         let canonicalDirectory = canonical(directory)
         let canonicalRoot = canonical(profilesRootDirectory(for: product))
-        guard canonicalDirectory.deletingLastPathComponent().path == canonicalRoot.path else {
+        guard canonicalDirectory.deletingLastPathComponent().path == canonicalRoot.path,
+              !DesktopProduct.allCases.contains(where: {
+                  canonical(profilesRootDirectory(for: $0)).path == canonicalDirectory.path
+              })
+        else {
             throw ProfileStoreError.unmanagedProfileDirectory(directory.path)
         }
     }
@@ -1253,6 +1263,8 @@ public final class ProfileStore: @unchecked Sendable {
             let quarantine = move.quarantine.standardizedFileURL
             let parent = canonical(original.deletingLastPathComponent()).path
             guard profileParents.contains(parent) || shortcutParents.contains(parent),
+                  !profileParents.contains(canonical(original).path),
+                  !shortcutParents.contains(canonical(original).path),
                   canonical(quarantine.deletingLastPathComponent()).path == parent,
                   quarantine.lastPathComponent.hasPrefix(".codexer-deleting-"),
                   quarantine.lastPathComponent.hasSuffix("-\(original.lastPathComponent)"),
@@ -1261,11 +1273,11 @@ public final class ProfileStore: @unchecked Sendable {
             else {
                 throw ProfileStoreError.invalidRecoveryJournal(quarantine.path)
             }
-            if profileParents.contains(parent),
-               let owner = storedProfiles.first(where: {
-                   canonical($0.profileDirectory).path == canonical(original).path
-               }),
-               owner.id != journal.profileID
+            if storedProfiles.contains(where: {
+                $0.id != journal.profileID
+                    && (canonical($0.profileDirectory).path == canonical(original).path
+                        || canonical($0.shortcutPath).path == canonical(original).path)
+            })
             {
                 throw ProfileStoreError.invalidRecoveryJournal(original.path)
             }
@@ -1273,11 +1285,12 @@ public final class ProfileStore: @unchecked Sendable {
     }
 
     private func validateAnyManagedDirectory(_ directory: URL) throws {
-        let parent = canonical(directory).deletingLastPathComponent().path
+        let canonicalDirectory = canonical(directory)
+        let parent = canonicalDirectory.deletingLastPathComponent().path
         let allowedParents = Set(DesktopProduct.allCases.map {
             canonical(profilesRootDirectory(for: $0)).path
         })
-        guard allowedParents.contains(parent) else {
+        guard allowedParents.contains(parent), !allowedParents.contains(canonicalDirectory.path) else {
             throw ProfileStoreError.unmanagedProfileDirectory(directory.path)
         }
     }
