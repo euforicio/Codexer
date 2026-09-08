@@ -120,8 +120,12 @@ Claude Desktop OAuth access tokens and the active Desktop organization from
 provider-owned Keychain and local state, then calls Anthropic's OAuth profile
 and usage endpoints. Tokens are held only for the request; AgentDock never
 copies them into its own storage, refreshes or rotates them, includes them in
-analytics, or logs them. Background reads forbid Keychain interaction; a manual
-refresh may show the system access prompt. Managed profiles resolve credentials
+analytics, or logs them. The Desktop decryption key is retained only in memory
+for the usage client's lifetime and reused across official and managed profiles.
+Each profile's tokens and account identity are still read afresh from its files.
+Background reads forbid Keychain interaction, including legacy login-Keychain
+prompts. A manual refresh can request access; choosing **Always Allow** lets
+macOS retain that grant for subsequent launches of the signed app. Managed profiles resolve credentials
 only from their own Desktop user-data roots. Desktop usage requires a valid
 account and organization identity, and responses are verified against that
 identity before display. An explicit identity mismatch clears the corresponding

@@ -1,3 +1,4 @@
+import Security
 import XCTest
 @testable import CodexerCore
 
@@ -34,6 +35,28 @@ final class ClaudeUsageClientTests: XCTestCase {
         XCTAssertNotEqual(original.cacheKey, otherAccount.cacheKey)
         XCTAssertNotEqual(original.cacheKey, otherOrganization.cacheKey)
         XCTAssertFalse(original.cacheKey.contains(original.accessToken))
+    }
+
+    func testNoninteractiveKeychainReadSuppressesLegacyUIAndRestoresState() throws {
+        var original = DarwinBoolean(false)
+        XCTAssertEqual(SecKeychainGetUserInteractionAllowed(&original), errSecSuccess)
+        defer { _ = SecKeychainSetUserInteractionAllowed(original.boolValue) }
+        XCTAssertEqual(SecKeychainSetUserInteractionAllowed(true), errSecSuccess)
+
+        let result: Bool? = ClaudeKeychainAccess.withInteractionAllowed(false) {
+            var allowed = DarwinBoolean(true)
+            XCTAssertEqual(SecKeychainGetUserInteractionAllowed(&allowed), errSecSuccess)
+            return allowed.boolValue
+        }
+        XCTAssertEqual(result, false)
+        var restored = DarwinBoolean(false)
+        XCTAssertEqual(SecKeychainGetUserInteractionAllowed(&restored), errSecSuccess)
+        XCTAssertTrue(restored.boolValue)
+
+        let missing: String? = ClaudeKeychainAccess.withInteractionAllowed(false) { nil }
+        XCTAssertNil(missing)
+        XCTAssertEqual(SecKeychainGetUserInteractionAllowed(&restored), errSecSuccess)
+        XCTAssertTrue(restored.boolValue)
     }
 
     func testInstalledOfficialUsageWhenEnabled() async throws {
