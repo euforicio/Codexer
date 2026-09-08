@@ -43,6 +43,7 @@ public actor ClaudeUsageClient: ClaudeUsageFetching {
     }
 
     private let session: URLSession
+    private var credentialReader = ClaudeCredentialReader()
     private var cache: [String: CachedUsage] = [:]
     private var refreshWaiters: [String: [CheckedContinuation<ProfileRateLimits, Never>]] = [:]
 
@@ -64,15 +65,20 @@ public actor ClaudeUsageClient: ClaudeUsageFetching {
         allowKeychainInteraction: Bool,
         forceRefresh: Bool = false
     ) async -> ProfileRateLimits {
-        let reader = ClaudeCredentialReader(allowKeychainInteraction: allowKeychainInteraction)
-        let codeCredential = reader.readCodeCredential(homeURL: claudeCodeHomeURL)
+        let codeCredential = credentialReader.readCodeCredential(
+            homeURL: claudeCodeHomeURL,
+            allowKeychainInteraction: allowKeychainInteraction
+        )
         let credential = if let codeCredential,
                             codeCredential.scopes.isEmpty
                                 || codeCredential.scopes.contains("user:profile")
         {
             codeCredential
         } else {
-            reader.readDesktopCredential(userDataURL: claudeUserDataURL) ?? codeCredential
+            credentialReader.readDesktopCredential(
+                userDataURL: claudeUserDataURL,
+                allowKeychainInteraction: allowKeychainInteraction
+            ) ?? codeCredential
         }
         return await fetch(credential, forceRefresh: forceRefresh)
     }
@@ -82,9 +88,10 @@ public actor ClaudeUsageClient: ClaudeUsageFetching {
         allowKeychainInteraction: Bool,
         forceRefresh: Bool = false
     ) async -> ProfileRateLimits {
-        let credential = ClaudeCredentialReader(
+        let credential = credentialReader.readDesktopCredential(
+            userDataURL: claudeUserDataURL,
             allowKeychainInteraction: allowKeychainInteraction
-        ).readDesktopCredential(userDataURL: claudeUserDataURL)
+        )
         return await fetch(credential, forceRefresh: forceRefresh)
     }
 
@@ -94,7 +101,7 @@ public actor ClaudeUsageClient: ClaudeUsageFetching {
     ) async -> ProfileRateLimits {
         guard let credential else {
             return ProfileRateLimits(
-                errorMessage: "Live usage is unavailable. Open Claude and sign in, then refresh."
+                errorMessage: "Live usage is unavailable. Open Claude and sign in, then refresh. If macOS asks for Keychain access, choose Always Allow to retain access."
             )
         }
         guard credential.scopes.isEmpty || credential.scopes.contains("user:profile") else {
@@ -466,23 +473,31 @@ enum ClaudeUsageResponseParser {
     }
 }
 
-private struct ClaudeCredentialReader {
+struct ClaudeCredentialReader {
     private static let codeService = "Claude Code-credentials"
     private static let safeStorageService = "Claude Safe Storage"
     private static let safeStorageAccount = "Claude Key"
     private static let cacheKeys = ["oauth:tokenCacheV2", "oauth:tokenCache"]
-    private let allowKeychainInteraction: Bool
+    // One reader lives on ClaudeUsageClient's actor and shares this Desktop key
+    // across profiles. Tokens and account identity are still reread for each root.
+    private var desktopKey: Data?
+    private let keychain: SecKeychain?
 
-    init(allowKeychainInteraction: Bool) {
-        self.allowKeychainInteraction = allowKeychainInteraction
+    init(keychain: SecKeychain? = nil) {
+        self.keychain = keychain
     }
 
-    func readCodeCredential(homeURL: URL) -> ClaudeUsageCredential? {
+    func readCodeCredential(homeURL: URL, allowKeychainInteraction: Bool) -> ClaudeUsageCredential? {
         let identity = codeIdentity(homeURL: homeURL)
         if let text = readKeychainPassword(
             service: Self.codeService,
-            account: NSUserName()
-        ) ?? readKeychainPassword(service: Self.codeService, account: nil),
+            account: NSUserName(),
+            allowKeychainInteraction: allowKeychainInteraction
+        ) ?? readKeychainPassword(
+            service: Self.codeService,
+            account: nil,
+            allowKeychainInteraction: allowKeychainInteraction
+        ),
            let credential = parseCredential(text, identity: identity)
         {
             return credential
@@ -495,18 +510,18 @@ private struct ClaudeCredentialReader {
         return parseCredential(text, identity: identity)
     }
 
-    func readDesktopCredential(userDataURL: URL) -> ClaudeUsageCredential? {
+    mutating func readDesktopCredential(
+        userDataURL: URL,
+        allowKeychainInteraction: Bool
+    ) -> ClaudeUsageCredential? {
         let configURL = userDataURL.appendingPathComponent("config.json")
         guard let data = try? BoundedFileReader.data(
                   at: configURL,
                   maximumBytes: LocalControlFileLimit.providerCredentialState
               ),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let password = readKeychainPassword(
-                  service: Self.safeStorageService,
-                  account: Self.safeStorageAccount
-              ),
-              let key = try? deriveKey(password: password)
+              Self.cacheKeys.contains(where: { root[$0] is String }),
+              let key = safeStorageKey(allowKeychainInteraction: allowKeychainInteraction)
         else { return nil }
 
         let caches = Self.cacheKeys.compactMap { cacheKey -> [String: Any]? in
@@ -683,7 +698,22 @@ private struct ClaudeCredentialReader {
         return nil
     }
 
-    private func readKeychainPassword(service: String, account: String?) -> String? {
+    private mutating func safeStorageKey(allowKeychainInteraction: Bool) -> Data? {
+        if let desktopKey { return desktopKey }
+        guard let password = readKeychainPassword(
+            service: Self.safeStorageService,
+            account: Self.safeStorageAccount,
+            allowKeychainInteraction: allowKeychainInteraction
+        ), let key = try? deriveKey(password: password) else { return nil }
+        desktopKey = key
+        return key
+    }
+
+    private func readKeychainPassword(
+        service: String,
+        account: String?,
+        allowKeychainInteraction: Bool
+    ) -> String? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -691,17 +721,20 @@ private struct ClaudeCredentialReader {
             kSecReturnData as String: true
         ]
         if let account { query[kSecAttrAccount as String] = account }
+        if let keychain { query[kSecMatchSearchList as String] = [keychain] }
         if !allowKeychainInteraction {
             let context = LAContext()
             context.interactionNotAllowed = true
             query[kSecUseAuthenticationContext as String] = context
         }
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let value = String(data: data, encoding: .utf8)
-        else { return nil }
-        return nonempty(value)
+        return ClaudeKeychainAccess.withInteractionAllowed(allowKeychainInteraction) {
+            var result: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+                  let data = result as? Data,
+                  let value = String(data: data, encoding: .utf8)
+            else { return nil }
+            return nonempty(value)
+        }
     }
 
     private func deriveKey(password: String) throws -> Data {
@@ -811,5 +844,22 @@ private extension Data {
             index = next
         }
         self.init(bytes)
+    }
+}
+
+// Claude uses the file-based login Keychain. LAContext only suppresses UI for
+// Data Protection items; legacy Keychain access needs the process-level flag.
+// Serialize the synchronous read and restore the prior flag before returning.
+enum ClaudeKeychainAccess {
+    private static let lock = NSLock()
+
+    static func withInteractionAllowed<T>(_ allowed: Bool, operation: () -> T?) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        var previous = DarwinBoolean(false)
+        guard SecKeychainGetUserInteractionAllowed(&previous) == errSecSuccess else { return nil }
+        guard SecKeychainSetUserInteractionAllowed(allowed) == errSecSuccess else { return nil }
+        defer { _ = SecKeychainSetUserInteractionAllowed(previous.boolValue) }
+        return operation()
     }
 }
